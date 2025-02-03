@@ -35,13 +35,15 @@ export function createSubscribePlugin() {
           return;
         }
 
+        const safeUrl = `https://${match.groups.domain}/${match.groups.repo}/pull/${match.groups.id}`;
+
         const pullFile = await jsonStorage.create(
-          `pull-${encodeURIComponent(url)}`,
+          `pull-${encodeURIComponent(safeUrl)}`,
           {},
           { filepath: 'pulls' },
         );
 
-        return [match.groups, pullFile];
+        return [safeUrl, match.groups, pullFile];
       }
 
       async function subscribe(url) {
@@ -52,10 +54,10 @@ export function createSubscribePlugin() {
           process.exit(1);
         }
 
-        const [meta, pullFile] = pullMeta;
+        const [safeUrl, meta, pullFile] = pullMeta;
 
         const data = {
-          url,
+          url: safeUrl,
           id: meta.id,
           domain: meta.domain,
           repo: meta.repo,
@@ -89,14 +91,14 @@ export function createSubscribePlugin() {
             process.exit(1);
           }
 
-          const [meta, pullFile] = pullMeta;
+          const [safeUrl, meta, pullFile] = pullMeta;
 
           await pullFile.delete();
 
           console.log();
           console.log(chalk.italic.green('Unsubscribed'));
           console.log();
-          console.log(`url: ${url}`);
+          console.log(`url: ${safeUrl}`);
           console.log(`domain: ${meta.domain}`);
           console.log(`repo: ${meta.repo}`);
           console.log(`id: ${meta.id}`);
