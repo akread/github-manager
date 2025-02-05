@@ -179,6 +179,9 @@ export function createSubscribePlugin() {
             const approvals = reviews.filter(
               (review) => review.state === 'APPROVED',
             );
+            const changesRequested = reviews.filter(
+              (review) => review.state === 'CHANGES_REQUESTED',
+            );
 
             return {
               file: pullFile,
@@ -200,6 +203,10 @@ export function createSubscribePlugin() {
               newApprovals: approvals.filter(
                 (approval) =>
                   new Date(approval.submitted_at) > new Date(pull.since),
+              ),
+              changesRequested,
+              newChangesRequested: changesRequested.filter(
+                (cr) => new Date(cr.submitted_at) > new Date(pull.since),
               ),
             };
           }),
@@ -231,7 +238,8 @@ export function createSubscribePlugin() {
             result.comments.length ||
             result.reviewComments.length ||
             result.requestReviewers.length ||
-            result.newApprovals.length,
+            result.newApprovals.length ||
+            result.newChangesRequested.length,
         );
 
         const hasUpdates = !!updates.length;
@@ -318,6 +326,15 @@ export function createSubscribePlugin() {
             const message = `${u.approvals.length} approval(s)`;
             if (u.newApprovals.length) {
               console.log(chalk.italic.yellow(message));
+            } else {
+              console.log(chalk.italic.dim(message));
+            }
+          }
+
+          if (u.changesRequested.length) {
+            const message = `${u.changesRequested.length} changes requested`;
+            if (u.newChangesRequested.length) {
+              console.log(chalk.italic.red(message));
             } else {
               console.log(chalk.italic.dim(message));
             }
