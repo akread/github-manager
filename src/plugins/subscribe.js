@@ -180,7 +180,14 @@ export function createSubscribePlugin() {
               (review) => review.state === 'APPROVED',
             );
             const changesRequested = reviews.filter(
-              (review) => review.state === 'CHANGES_REQUESTED',
+              (review) =>
+                review.state === 'CHANGES_REQUESTED' &&
+                !approvals.find(
+                  (approval) =>
+                    approval.user.login === review.user.login &&
+                    new Date(review.submitted_at) <
+                      new Date(approval.submitted_at),
+                ),
             );
 
             return {
