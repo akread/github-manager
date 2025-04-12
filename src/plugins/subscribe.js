@@ -377,13 +377,19 @@ export function createSubscribePlugin() {
           async function refresh(getPulls = loadPulls, datetime = new Date()) {
             date = datetime;
 
-            // clear screen
-            process.stdout.write('\x1Bc');
+            process.stdout.write('\x1Bc'); // clear screen
 
             console.log(chalk.dim(date.toString()));
+            console.log();
+            console.log('Refreshing...');
 
             try {
               pulls = await getPulls();
+
+              process.stdout.write('\x1Bc'); // clear screen
+              console.log(chalk.dim(date.toString()));
+              console.log();
+
               await displayPulls(pulls, options);
             } catch (e) {
               console.log();
