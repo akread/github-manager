@@ -198,6 +198,7 @@ export function createSubscribePlugin() {
               ours: domainConfig.username === pullRequest.user.login,
               state: pullRequest.state,
               merged: pullRequest.merged,
+              mergedCommit: pullRequest.merge_commit_sha,
               draft: pullRequest.draft,
               since,
               comments: comments.filter(commentFilterPredicate),
@@ -300,6 +301,11 @@ export function createSubscribePlugin() {
               u.ours ? chalk.underline.dim(authorTag) : chalk.dim(authorTag)
             }`,
           );
+
+          if (u.merged) {
+            console.log(chalk.magenta(u.mergedCommit));
+          }
+
           console.log(`${chalk.dim(u.url)}`);
 
           if (u.comments.length) {
