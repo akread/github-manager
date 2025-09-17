@@ -1,8 +1,17 @@
 import chalk from 'chalk';
 import path from 'node:path';
 import { readdir } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import util from 'node:util';
+
+const execp = util.promisify(execFile);
 
 async function fetchGithubApi(path, { domain, token }) {
+  if (token === 'cli') {
+    const response = await execp('gh', ['api', path]);
+    return JSON.parse(response.stdout);
+  }
+
   const response = await fetch(
     `https://api.${domain}/${
       path.startsWith('/') ? path.replace('/', '') : path
