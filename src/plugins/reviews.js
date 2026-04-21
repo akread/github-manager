@@ -6,26 +6,9 @@ import util from 'node:util';
 
 const execp = util.promisify(execFile);
 
-async function fetchGithubApi(path, { domain, token }) {
-  if (token === 'cli') {
-    const response = await execp('gh', ['api', path]);
-    return JSON.parse(response.stdout);
-  }
-
-  const response = await fetch(
-    `https://api.${domain}/${
-      path.startsWith('/') ? path.replace('/', '') : path
-    }`,
-    {
-      headers: {
-        accept: 'application/vnd.github+json',
-        authorization: `Bearer ${token}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-    },
-  );
-
-  return response.json();
+async function fetchGithubApi(path, { domain }) {
+  const response = await execp('gh', ['api', '--hostname', domain, path]);
+  return JSON.parse(response.stdout);
 }
 
 export function createReviewsPlugin() {
@@ -156,7 +139,6 @@ export function createReviewsPlugin() {
 
             const apiConfig = {
               domain: repo.domain,
-              token: domainConfig.token,
             };
 
             const query = encodeURIComponent(

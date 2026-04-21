@@ -6,40 +6,22 @@ import util from 'node:util';
 
 const execp = util.promisify(execFile);
 
-async function fetchGithubApi(path, { domain, token }) {
-  if (token === 'cli') {
-    const response = await execp('gh', ['api', path]);
-    return JSON.parse(response.stdout);
-  }
-
-  const response = await fetch(
-    `https://api.${domain}/${
-      path.startsWith('/') ? path.replace('/', '') : path
-    }`,
-    {
-      headers: {
-        accept: 'application/vnd.github+json',
-        authorization: `Bearer ${token}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-    },
-  );
-
-  return response.json();
+async function fetchGithubApi(path, { domain }) {
+  const response = await execp('gh', ['api', '--hostname', domain, path]);
+  return JSON.parse(response.stdout);
 }
 
-async function fetchRequiredChecks(data, { token }) {
-  if (token !== 'cli') {
-    return;
-  }
+async function fetchRequiredChecks(data) {
   try {
     const response = await execp('gh', [
       'pr',
       'checks',
+      data.id,
+      '--repo',
+      `${data.domain}/${data.repo}`,
       '--required',
       '--json',
       'state',
-      data.url,
     ]);
     return JSON.parse(response.stdout);
   } catch (e) {
@@ -181,7 +163,6 @@ export function createSubscribePlugin() {
 
             const apiConfig = {
               domain: pull.domain,
-              token: domainConfig.token,
             };
 
             const [
@@ -199,7 +180,7 @@ export function createSubscribePlugin() {
                 `/repos/${pull.repo}/pulls/${pull.id}/requested_reviewers`,
                 `/repos/${pull.repo}/pulls/${pull.id}/reviews`,
               ].map((route) => fetchGithubApi(route, apiConfig)),
-              fetchRequiredChecks(pull, apiConfig),
+              fetchRequiredChecks(pull),
             ]);
 
             const since = new Date();
