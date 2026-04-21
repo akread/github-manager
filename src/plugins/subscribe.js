@@ -28,6 +28,32 @@ async function fetchGithubApi(path, { domain, token }) {
   return response.json();
 }
 
+async function fetchRequiredChecks(data, { token }) {
+  if (token !== 'cli') {
+    return;
+  }
+  try {
+    const response = await execp('gh', [
+      'pr',
+      'checks',
+      '--required',
+      '--json',
+      'state',
+      data.url,
+    ]);
+    return JSON.parse(response.stdout);
+  } catch (e) {
+    if (
+      e.stderr.includes('no checks reported') ||
+      e.stderr.includes('no required checks reported')
+    ) {
+      return [];
+    }
+
+    throw e;
+  }
+}
+
 export function createSubscribePlugin() {
   return {
     name: 'subscribe',
@@ -164,15 +190,17 @@ export function createSubscribePlugin() {
               reviewComments,
               requestReviewers,
               reviews,
-            ] = await Promise.all(
-              [
+              checks,
+            ] = await Promise.all([
+              ...[
                 `/repos/${pull.repo}/pulls/${pull.id}`,
                 `/repos/${pull.repo}/issues/${pull.id}/comments?since=${pull.since}`,
                 `/repos/${pull.repo}/pulls/${pull.id}/comments?since=${pull.since}`,
                 `/repos/${pull.repo}/pulls/${pull.id}/requested_reviewers`,
                 `/repos/${pull.repo}/pulls/${pull.id}/reviews`,
               ].map((route) => fetchGithubApi(route, apiConfig)),
-            );
+              fetchRequiredChecks(pull, apiConfig),
+            ]);
 
             const since = new Date();
 
@@ -225,6 +253,17 @@ export function createSubscribePlugin() {
               newChangesRequested: changesRequested.filter(
                 (cr) => new Date(cr.submitted_at) > new Date(pull.since),
               ),
+              checkState: checks?.reduce((accum, next) => {
+                if (accum === 'FAILURE') {
+                  return accum;
+                }
+
+                if (accum === 'PENDING') {
+                  return accum;
+                }
+
+                return next.state;
+              }, ''),
             };
           }),
         );
@@ -291,12 +330,12 @@ export function createSubscribePlugin() {
               return chalk.italic.magenta('[MERGED]');
             }
 
-            if (u.draft) {
-              return chalk.italic.dim('[DRAFT]');
-            }
-
             if (u.state === 'closed') {
               return chalk.italic.red('[CLOSED]');
+            }
+
+            if (u.draft) {
+              return chalk.italic.dim('[DRAFT]');
             }
 
             return chalk.italic.green('[OPEN]');
@@ -362,6 +401,18 @@ export function createSubscribePlugin() {
             }
           }
 
+          if (u.checkState && !u.merged) {
+            if (u.checkState === 'FAILURE') {
+              console.log(
+                chalk.italic.rgb(242, 106, 27)('Required checks failed'),
+              );
+            } else if (u.checkState === 'PENDING') {
+              console.log(chalk.italic.green('Requred checks running'));
+            } else {
+              console.log(chalk.italic.dim('Requred checks passed'));
+            }
+          }
+
           if (u.unsubscribed) {
             const message = 'Unsubscribed';
             console.log(chalk.italic.red(message));
@@ -407,6 +458,7 @@ export function createSubscribePlugin() {
 
               await displayPulls(pulls, options);
             } catch (e) {
+              console.log(e);
               console.log();
               console.log(chalk.bold.red('Error retrieving pull requests...'));
             }

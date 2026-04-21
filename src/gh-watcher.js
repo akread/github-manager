@@ -9,6 +9,7 @@ import { initializePlugins } from './initialize-plugins.js';
 import { createJsonStoragePlugin } from './plugins/json-storage.js';
 import { createConfigPlugin } from './plugins/config.js';
 import { createSubscribePlugin } from './plugins/subscribe.js';
+import { createReviewsPlugin } from './plugins/reviews.js';
 
 const USER_DIR = homedir();
 const APP_DIR = path.resolve(USER_DIR, '.github-manager');
@@ -19,6 +20,7 @@ const plugins = [
     editor: 'vim',
   }),
   createSubscribePlugin(),
+  createReviewsPlugin(),
 ];
 
 async function main() {
