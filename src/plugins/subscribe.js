@@ -11,6 +11,18 @@ async function fetchGithubApi(path, { domain }) {
   return JSON.parse(response.stdout);
 }
 
+async function fetchUsername(domain) {
+  const response = await execp('gh', [
+    'api',
+    'user',
+    '-q',
+    '.login',
+    '--hostname',
+    domain,
+  ]);
+  return response.stdout.trim();
+}
+
 async function fetchRequiredChecks(data) {
   try {
     const response = await execp('gh', [
@@ -172,6 +184,7 @@ export function createSubscribePlugin() {
               requestReviewers,
               reviews,
               checks,
+              username,
             ] = await Promise.all([
               ...[
                 `/repos/${pull.repo}/pulls/${pull.id}`,
@@ -181,6 +194,7 @@ export function createSubscribePlugin() {
                 `/repos/${pull.repo}/pulls/${pull.id}/reviews`,
               ].map((route) => fetchGithubApi(route, apiConfig)),
               fetchRequiredChecks(pull),
+              fetchUsername(pull.domain),
             ]);
 
             const since = new Date();
@@ -190,7 +204,7 @@ export function createSubscribePlugin() {
             // - [].user.login
             // - [].user.type === 'User'
             const commentFilterPredicate = (comment) =>
-              comment.user.login !== domainConfig.username &&
+              comment.user.login !== username &&
               comment.user.type === 'User' &&
               !excludedUsernames.includes(comment.user.login);
 
@@ -213,7 +227,7 @@ export function createSubscribePlugin() {
               ...pull,
               title: pullRequest.title,
               author: pullRequest.user.login,
-              ours: domainConfig.username === pullRequest.user.login,
+              ours: username === pullRequest.user.login,
               state: pullRequest.state,
               merged: pullRequest.merged,
               mergedCommit: pullRequest.merge_commit_sha,
@@ -223,7 +237,7 @@ export function createSubscribePlugin() {
               reviewComments: reviewComments.filter(commentFilterPredicate),
               // - users[].login
               requestReviewers: requestReviewers.users.filter(
-                (user) => user.login === domainConfig.username,
+                (user) => user.login === username,
               ),
               approvals,
               newApprovals: approvals.filter(

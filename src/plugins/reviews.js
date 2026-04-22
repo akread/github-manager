@@ -11,6 +11,18 @@ async function fetchGithubApi(path, { domain }) {
   return JSON.parse(response.stdout);
 }
 
+async function fetchUsername(domain) {
+  const response = await execp('gh', [
+    'api',
+    'user',
+    '-q',
+    '.login',
+    '--hostname',
+    domain,
+  ]);
+  return response.stdout.trim();
+}
+
 export function createReviewsPlugin() {
   return {
     name: 'reviews',
@@ -141,8 +153,10 @@ export function createReviewsPlugin() {
               domain: repo.domain,
             };
 
+            const username = await fetchUsername(repo.domain);
+
             const query = encodeURIComponent(
-              `is:pr is:open review-requested:${domainConfig.username} repo:${repo.repo}`,
+              `is:pr is:open review-requested:${username} repo:${repo.repo}`,
             );
 
             const result = await fetchGithubApi(
