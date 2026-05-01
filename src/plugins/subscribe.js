@@ -520,6 +520,8 @@ export function createSubscribePlugin() {
               }
             });
         });
+
+      return { subscribe };
     },
   };
 }

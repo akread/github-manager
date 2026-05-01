@@ -26,9 +26,9 @@ async function fetchUsername(domain) {
 export function createReviewsPlugin() {
   return {
     name: 'reviews',
-    dependencies: ['config'],
+    dependencies: ['config', 'subscribe'],
     async initialize(program, context) {
-      const { jsonStorage, config } = context.plugins;
+      const { jsonStorage, config, subscribe } = context.plugins;
 
       function parseRepo(input) {
         const urlMatch = input.match(
@@ -211,6 +211,8 @@ export function createReviewsPlugin() {
           ),
         );
 
+        const displayed = [];
+
         for (const result of results) {
           const displayPulls = options.expanded
             ? result.pulls
@@ -229,16 +231,20 @@ export function createReviewsPlugin() {
           }
 
           for (const pull of displayPulls) {
+            displayed.push(pull);
+            const index = displayed.length;
             const draftTag = pull.draft ? chalk.italic.dim('[DRAFT] ') : '';
             const newTag = pull.isNew ? chalk.bold.yellow('• ') : '';
             console.log(
-              `  ${newTag}${draftTag}${pull.title} ${chalk.dim(
-                `@${pull.author}`,
-              )}`,
+              `  ${newTag}${chalk.dim(`[${index}]`)} ${draftTag}${
+                pull.title
+              } ${chalk.dim(`@${pull.author}`)}`,
             );
             console.log(`  ${chalk.dim(pull.url)}`);
           }
         }
+
+        return displayed;
       }
 
       reviews
@@ -260,6 +266,7 @@ export function createReviewsPlugin() {
         .option('--expanded')
         .action(async (options) => {
           let results = [];
+          let displayed = [];
           let date;
 
           async function refresh(
@@ -281,7 +288,7 @@ export function createReviewsPlugin() {
               console.log(chalk.dim(date.toString()));
               console.log();
 
-              displayReviews(results, options);
+              displayed = displayReviews(results, options);
             } catch (e) {
               console.log(e);
               console.log();
@@ -293,9 +300,11 @@ export function createReviewsPlugin() {
             console.log('\n');
             console.log(
               chalk.dim(
-                `[${chalk.bold('c')}] commit [${chalk.bold(
-                  'r',
-                )}] refresh [${chalk.bold('x')}] exit`,
+                `[${chalk.bold('s')}] subscribe [${chalk.bold(
+                  'c',
+                )}] commit [${chalk.bold('r')}] refresh [${chalk.bold(
+                  'x',
+                )}] exit`,
               ),
             );
           }
@@ -304,6 +313,8 @@ export function createReviewsPlugin() {
 
           const interval = setInterval(refresh, 5 * 60 * 1000);
 
+          let mode = 'shortcuts';
+
           process.stdin.write('\u001B[?25l');
 
           process.stdin
@@ -311,16 +322,49 @@ export function createReviewsPlugin() {
             .setEncoding('utf8')
             .resume()
             .on('data', async (key) => {
-              if (key === '\u0003' || key === 'x') {
+              if (key === '\u0003') {
                 clearInterval(interval);
                 process.stdin.write('\u001B[?25h');
                 process.exit();
-              } else if (key === 'r') {
+              }
+              if (mode === 'shortcuts') {
+                if (key === 'x') {
+                  clearInterval(interval);
+                  process.stdin.write('\u001B[?25h');
+                  process.exit();
+                } else if (key === 'r') {
+                  await refresh();
+                  process.stdin.write('\u001B[?25l');
+                } else if (key === 'c') {
+                  await refresh(() => updateReviews(results), date);
+                  process.stdin.write('\u001B[?25l');
+                } else if (key === 's') {
+                  if (!displayed.length) {
+                    return;
+                  }
+                  mode = 'subscribe';
+                  process.stdin.setRawMode(false);
+                  process.stdin.write('\u001B[?25h');
+                  console.log('');
+                  console.log('Input an index to subscribe to:');
+                }
+              } else {
+                const input = key.trim();
+                const index = Number.parseInt(input, 10);
+                const pull = Number.isInteger(index)
+                  ? displayed[index - 1]
+                  : undefined;
+                if (pull) {
+                  await subscribe.subscribe(pull.url);
+                  await new Promise((res) => setTimeout(res, 3000));
+                } else if (input) {
+                  console.log(chalk.bold.red(`Invalid index: ${input}`));
+                  await new Promise((res) => setTimeout(res, 1500));
+                }
                 await refresh();
+                process.stdin.setRawMode(true);
                 process.stdin.write('\u001B[?25l');
-              } else if (key === 'c') {
-                await refresh(() => updateReviews(results), date);
-                process.stdin.write('\u001B[?25l');
+                mode = 'shortcuts';
               }
             });
         });
