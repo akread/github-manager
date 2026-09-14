@@ -31,6 +31,7 @@ type PullsOptions struct {
 	Interval time.Duration
 	Expanded bool // show every pull request, not only those with updates
 	Comments bool // show the text of new comments
+	Mine     bool // show only the pull requests of the authenticated user
 	// Open opens a URL in the browser. Nil means the system default.
 	Open func(url string) error
 }
@@ -86,6 +87,7 @@ type pullsModel struct {
 
 	showAll      bool
 	showComments bool
+	showMine     bool // hide pull requests from other authors
 
 	input   textinput.Model
 	inputOn bool
@@ -108,7 +110,7 @@ func newPullsModel(o PullsOptions) *pullsModel {
 	ti.Prompt = "subscribe url: "
 	ti.Placeholder = "https://github.com/owner/name/pull/123"
 	ti.Cursor.SetMode(cursor.CursorStatic)
-	return &pullsModel{o: o, showAll: o.Expanded, showComments: o.Comments, input: ti}
+	return &pullsModel{o: o, showAll: o.Expanded, showComments: o.Comments, showMine: o.Mine, input: ti}
 }
 
 func (m *pullsModel) Init() tea.Cmd {
@@ -131,11 +133,19 @@ func (m *pullsModel) refresh() tea.Cmd {
 	}
 }
 
-// visible returns the indices of the entries to show.
+// visible returns the indices of the entries to show. An entry whose fetch
+// failed always shows: its author is unknown, and the error needs attention.
 func (m *pullsModel) visible() []int {
 	var out []int
 	for i, e := range m.entries {
-		if m.showAll || e.Err != nil || (e.Status != nil && e.Status.HasUpdates()) {
+		if e.Err != nil {
+			out = append(out, i)
+			continue
+		}
+		if e.Status == nil || (m.showMine && !e.Status.Ours) {
+			continue
+		}
+		if m.showAll || e.Status.HasUpdates() {
 			out = append(out, i)
 		}
 	}
@@ -261,6 +271,9 @@ func (m *pullsModel) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 	case "m":
 		m.showComments = !m.showComments
+	case "y":
+		m.showMine = !m.showMine
+		m.clampCursor()
 	case "c":
 		if i := m.selected(); i >= 0 {
 			m.commit(i)
@@ -413,6 +426,9 @@ func (m *pullsModel) frame() frame {
 	if m.showAll {
 		header += " · all shown"
 	}
+	if m.showMine {
+		header += " · mine only"
+	}
 	if !m.refreshedAt.IsZero() {
 		header += " · refreshed " + m.refreshedAt.Local().Format("15:04:05")
 	}
@@ -424,7 +440,7 @@ func (m *pullsModel) frame() frame {
 		errMsg:       m.errMsg,
 		status:       m.statusMsg,
 		helpExpanded: m.helpOn,
-		help:         "j/k move · c commit · C commit all · s subscribe · u unsubscribe · o open · r refresh · a toggle all · m toggle comments",
+		help:         "j/k move · c commit · C commit all · s subscribe · u unsubscribe · o open · r refresh · a toggle all · y toggle mine · m toggle comments",
 	}
 	if m.inputOn {
 		f.input = m.input.View()
@@ -445,6 +461,8 @@ func (m *pullsModel) View() string {
 		body = []string{dimStyle.Render("loading…")}
 	case len(m.entries) == 0:
 		body = []string{dimStyle.Render("no watched pull requests · press s to subscribe")}
+	case len(items) == 0 && m.showMine:
+		body = []string{dimStyle.Render("no pull requests of yours to show · press y to show every author")}
 	case len(items) == 0:
 		body = []string{dimStyle.Render("no updates · press a to show every pull request")}
 	default:

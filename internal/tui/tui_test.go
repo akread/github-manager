@@ -74,6 +74,9 @@ func fakePullLoader(pulls []store.Pull) []PullEntry {
 		if p.Number == 2 {
 			st.Comments = nil // quiet
 		}
+		if p.Number == 3 {
+			st.Ours = true // the authenticated user is the author
+		}
 		out[i] = PullEntry{Pull: p, Status: st}
 	}
 	return out
@@ -107,6 +110,45 @@ func TestPullsViewAndToggle(t *testing.T) {
 	v = plain(m.View())
 	if !strings.Contains(v, "Title 2") || !strings.Contains(v, "all shown") {
 		t.Fatalf("all shown: %s", v)
+	}
+}
+
+func TestPullsMineFilter(t *testing.T) {
+	m, _ := newTestPulls(t)
+	run(m, key("y"))
+	v := plain(m.View())
+	if !strings.Contains(v, "mine only") || !strings.Contains(v, "Title 3") || strings.Contains(v, "Title 1") {
+		t.Fatalf("mine only: %s", v)
+	}
+	// the mine filter also applies when every pull request is shown
+	run(m, key("a"))
+	v = plain(m.View())
+	if strings.Contains(v, "Title 2") || !strings.Contains(v, "Title 3") {
+		t.Fatalf("mine only with all shown: %s", v)
+	}
+	run(m, key("y"))
+	v = plain(m.View())
+	if strings.Contains(v, "mine only") || !strings.Contains(v, "Title 1") || !strings.Contains(v, "Title 2") {
+		t.Fatalf("every author again: %s", v)
+	}
+	// no pull request of ours: the body says how to get back
+	run(m, key("y"))
+	m.entries[2].Status.Ours = false
+	v = plain(m.View())
+	if !strings.Contains(v, "press y to show every author") {
+		t.Fatalf("empty mine: %s", v)
+	}
+	// a failed fetch always shows, because its author is unknown
+	m.entries[0] = PullEntry{Pull: m.entries[0].Pull, Err: errors.New("boom")}
+	if !strings.Contains(plain(m.View()), "[ERROR]") {
+		t.Fatalf("error must show under the mine filter: %s", plain(m.View()))
+	}
+	// the flag starts the watch with the filter on
+	m2 := newPullsModel(PullsOptions{Store: m.o.Store, Load: fakePullLoader, Interval: time.Hour, Mine: true, Open: func(string) error { return nil }})
+	run(m2, tea.WindowSizeMsg{Width: 100, Height: 30})
+	run(m2, m2.refresh()())
+	if v := plain(m2.View()); !strings.Contains(v, "mine only") || strings.Contains(v, "Title 1") {
+		t.Fatalf("--mine: %s", v)
 	}
 }
 

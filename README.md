@@ -33,7 +33,7 @@ source <(ghw completion zsh)
 ghw pulls subscribe https://github.com/owner/name/pull/123
 ghw pulls unsubscribe https://github.com/owner/name/pull/123
 ghw pulls list
-ghw pulls watch [--expanded] [--comments]
+ghw pulls watch [--expanded] [--comments] [--mine]
 
 ghw reviews subscribe owner/name             # github.com
 ghw reviews subscribe https://ghe.example.com/owner/name
@@ -46,7 +46,7 @@ ghw reviews watch [--expanded]
 
 Each subscription has a commit point. The watch shows activity after that point as new: comments, review comments, approvals, and requested changes. A pull request also counts as an update when it is closed, or when it requests your review.
 
-By default the watch shows only pull requests with updates. Comments from you, from non-user accounts, and from the excluded usernames of the domain are ignored.
+By default the watch shows only pull requests with updates. Comments from you, from non-user accounts, and from the excluded usernames of the domain are ignored. Your own pull requests show your username underlined. Press `y` to show only those.
 
 | Key | Action |
 | --- | --- |
@@ -58,6 +58,7 @@ By default the watch shows only pull requests with updates. Comments from you, f
 | `o` | open the selected pull request in the browser |
 | `r` | refresh now |
 | `a` | show every pull request, or only those with updates |
+| `y` | show only your own pull requests, or those from every author |
 | `m` | show or hide the text of new comments |
 | `?` | expand or collapse the help |
 | `q` | quit |
