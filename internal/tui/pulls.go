@@ -540,7 +540,11 @@ func (m *pullsModel) renderPull(e PullEntry, selected bool) []string {
 		}
 	}
 	if s.ReviewRequested {
-		rows = append(rows, indent+newStyle.Render("Review requested"))
+		if s.NewReviewRequest {
+			rows = append(rows, indent+newStyle.Render("Review requested"))
+		} else {
+			rows = append(rows, indent+dimItalic.Render("Review requested"))
+		}
 	}
 	if s.Approvals > 0 {
 		text := plural(s.Approvals, "approval")

@@ -29,14 +29,23 @@ type rawComment struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-type rawReview struct {
-	User        rawUser    `json:"user"`
-	State       string     `json:"state"`
-	SubmittedAt *time.Time `json:"submitted_at"`
+// rawEvent is one issue timeline event. The watch reads three kinds:
+// reviewed, review_requested, and review_request_removed. The fields that
+// a kind does not have stay empty.
+type rawEvent struct {
+	Event             string     `json:"event"`
+	User              rawUser    `json:"user"`               // reviewed
+	State             string     `json:"state"`              // reviewed, lowercase
+	SubmittedAt       *time.Time `json:"submitted_at"`       // reviewed
+	RequestedReviewer *rawUser   `json:"requested_reviewer"` // review_requested, review_request_removed; nil for a team
+	CreatedAt         time.Time  `json:"created_at"`         // review_requested, review_request_removed
 }
 
-type rawRequestedReviewers struct {
-	Users []rawUser `json:"users"`
+// rawReview is a submitted review, taken from a reviewed event.
+type rawReview struct {
+	User        rawUser
+	State       string // uppercase
+	SubmittedAt *time.Time
 }
 
 type rawCheck struct {
@@ -48,8 +57,7 @@ type pullData struct {
 	pull           rawPull
 	comments       []rawComment
 	reviewComments []rawComment
-	requested      rawRequestedReviewers
-	reviews        []rawReview
+	timeline       []rawEvent
 	checks         []rawCheck
 	username       string
 }
@@ -85,9 +93,10 @@ type PullStatus struct {
 	MergeCommit string
 	Draft       bool
 
-	Comments        []Comment // new since Since, after filters
-	ReviewComments  []Comment // new since Since, after filters
-	ReviewRequested bool      // the authenticated user is a requested reviewer
+	Comments         []Comment // new since Since, after filters
+	ReviewComments   []Comment // new since Since, after filters
+	ReviewRequested  bool      // the authenticated user is a requested reviewer
+	NewReviewRequest bool      // the request was made after Since
 
 	Approvals           int
 	NewApprovals        int
@@ -102,20 +111,60 @@ func (p *PullStatus) HasUpdates() bool {
 	return p.State != "open" ||
 		len(p.Comments) > 0 ||
 		len(p.ReviewComments) > 0 ||
-		p.ReviewRequested ||
+		p.NewReviewRequest ||
 		p.NewApprovals > 0 ||
 		p.NewChangesRequested > 0
 }
 
 // MarkSeen moves Since to FetchedAt and clears the new activity, as a
-// commit does. The review request flag stays: it reflects the current
-// state, not an event.
+// commit does. ReviewRequested stays: it reflects the current state. Only
+// the new flag clears.
 func (p *PullStatus) MarkSeen() {
 	p.Since = p.FetchedAt
 	p.Comments = nil
 	p.ReviewComments = nil
+	p.NewReviewRequest = false
 	p.NewApprovals = 0
 	p.NewChangesRequested = 0
+}
+
+// timelineExclude lists every known timeline event type except the three
+// the watch reads. The parameter is a deny list, so a type that GitHub adds
+// later comes through until it is added here; derivePull skips events it
+// does not know. The last row holds types seen in responses but absent from
+// the documentation. The API rejects a name it does not know with a 400, so
+// check a new name against the API before it goes in.
+var timelineExclude = strings.Join([]string{
+	"assigned", "closed", "commented", "committed", "commit-commented", "connected",
+	"convert_to_draft", "converted_to_discussion", "cross-referenced", "demilestoned",
+	"deployed", "disconnected", "head_ref_deleted", "head_ref_restored",
+	"head_ref_force_pushed", "labeled", "line-commented", "locked", "mentioned",
+	"marked_as_duplicate", "merged", "milestoned", "pinned", "ready_for_review",
+	"referenced", "renamed", "reopened", "review_dismissed", "subscribed", "transferred",
+	"unassigned", "unlabeled", "unlocked", "unmarked_as_duplicate", "unpinned",
+	"unsubscribed", "user_blocked",
+	"base_ref_changed", "copilot_work_started", "copilot_work_finished",
+}, ",")
+
+// timelinePageSize is the largest page the timeline endpoint allows.
+const timelinePageSize = 100
+
+// loadTimeline reads the review events of a pull request, oldest first. It
+// fetches pages until one comes back short.
+func (c *Client) loadTimeline(ref PullRef) ([]rawEvent, error) {
+	var out []rawEvent
+	for page := 1; ; page++ {
+		var events []rawEvent
+		path := fmt.Sprintf("repos/%s/issues/%d/timeline?per_page=%d&page=%d&exclude=%s",
+			ref.Repo, ref.Number, timelinePageSize, page, timelineExclude)
+		if err := c.api(ref.Domain, path, &events); err != nil {
+			return nil, err
+		}
+		out = append(out, events...)
+		if len(events) < timelinePageSize {
+			return out, nil
+		}
+	}
 }
 
 // LoadPull fetches one pull request and derives its status. Comments from
@@ -134,8 +183,11 @@ func (c *Client) LoadPull(ref PullRef, since time.Time, excluded []string) (*Pul
 		func() error {
 			return c.api(ref.Domain, base+"/comments?per_page=100&since="+sinceParam, &d.reviewComments)
 		},
-		func() error { return c.api(ref.Domain, base+"/requested_reviewers", &d.requested) },
-		func() error { return c.api(ref.Domain, base+"/reviews?per_page=100", &d.reviews) },
+		func() error {
+			events, err := c.loadTimeline(ref)
+			d.timeline = events
+			return err
+		},
 		func() error {
 			checks, err := c.requiredChecks(ref)
 			d.checks = checks
@@ -209,19 +261,35 @@ func derivePull(ref PullRef, d pullData, since, fetchedAt time.Time, excluded []
 		ReviewComments: toComments(d.reviewComments),
 		CheckState:     reduceChecks(d.checks),
 	}
-	for _, u := range d.requested.Users {
-		if u.Login == d.username {
-			s.ReviewRequested = true
+	// the events are oldest first, so the last request, removal, or review
+	// by the user gives the current state, and the time of the request says
+	// whether it is new. A review from the user ends the request: GitHub
+	// drops the reviewer from the requested list without a removal event.
+	var reviews []rawReview
+	for _, e := range d.timeline {
+		switch e.Event {
+		case "reviewed":
+			reviews = append(reviews, rawReview{User: e.User, State: strings.ToUpper(e.State), SubmittedAt: e.SubmittedAt})
+			if e.User.Login == d.username {
+				s.ReviewRequested = false
+				s.NewReviewRequest = false
+			}
+		case "review_requested", "review_request_removed":
+			if e.RequestedReviewer == nil || e.RequestedReviewer.Login != d.username {
+				continue
+			}
+			s.ReviewRequested = e.Event == "review_requested"
+			s.NewReviewRequest = s.ReviewRequested && e.CreatedAt.After(since)
 		}
 	}
 
 	var approvals []rawReview
-	for _, r := range d.reviews {
+	for _, r := range reviews {
 		if r.State == "APPROVED" {
 			approvals = append(approvals, r)
 		}
 	}
-	for _, r := range d.reviews {
+	for _, r := range reviews {
 		if r.State != "CHANGES_REQUESTED" {
 			continue
 		}

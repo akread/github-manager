@@ -44,7 +44,7 @@ ghw reviews watch [--expanded]
 
 ### pulls watch
 
-Each subscription has a commit point. The watch shows activity after that point as new: comments, review comments, approvals, and requested changes. A pull request also counts as an update when it is closed, or when it requests your review.
+Each subscription has a commit point. The watch shows activity after that point as new: comments, review comments, approvals, and requested changes. A pull request also counts as an update when it is closed, or when a review request for you arrives after that point. After a commit the `Review requested` row stays in the dim style until you submit the review.
 
 By default the watch shows only pull requests with updates. Comments from you, from non-user accounts, and from the excluded usernames of the domain are ignored. Your own pull requests show your username underlined. Press `y` to show only those.
 
