@@ -92,6 +92,9 @@ type pullsModel struct {
 	input   textinput.Model
 	inputOn bool
 
+	filter   textinput.Model // the text to match; it stays set after the input closes
+	filterOn bool            // the filter input has the focus
+
 	errMsg    string
 	statusMsg string
 	helpOn    bool // the user pressed ? to expand the help onto more rows
@@ -110,7 +113,11 @@ func newPullsModel(o PullsOptions) *pullsModel {
 	ti.Prompt = "subscribe url: "
 	ti.Placeholder = "https://github.com/owner/name/pull/123"
 	ti.Cursor.SetMode(cursor.CursorStatic)
-	return &pullsModel{o: o, showAll: o.Expanded, showComments: o.Comments, showMine: o.Mine, input: ti}
+	fi := textinput.New()
+	fi.Prompt = "filter: "
+	fi.Placeholder = "title, repo, number, author, or url"
+	fi.Cursor.SetMode(cursor.CursorStatic)
+	return &pullsModel{o: o, showAll: o.Expanded, showComments: o.Comments, showMine: o.Mine, input: ti, filter: fi}
 }
 
 func (m *pullsModel) Init() tea.Cmd {
@@ -133,11 +140,40 @@ func (m *pullsModel) refresh() tea.Cmd {
 	}
 }
 
+// filterText is the filter the user typed, without the spaces around it.
+func (m *pullsModel) filterText() string {
+	return strings.TrimSpace(m.filter.Value())
+}
+
+// matches reports whether the entry matches the filter text. The match is a
+// case-insensitive substring match on the title, the repo and number, the
+// author, and the url. An empty filter matches every entry.
+func (m *pullsModel) matches(e PullEntry) bool {
+	q := strings.ToLower(m.filterText())
+	if q == "" {
+		return true
+	}
+	hay := []string{fmt.Sprintf("%s#%d", e.Pull.Repo, e.Pull.Number), e.Pull.URL}
+	if e.Status != nil {
+		hay = append(hay, e.Status.Title, "@"+e.Status.Author)
+	}
+	for _, h := range hay {
+		if strings.Contains(strings.ToLower(h), q) {
+			return true
+		}
+	}
+	return false
+}
+
 // visible returns the indices of the entries to show. An entry whose fetch
 // failed always shows: its author is unknown, and the error needs attention.
+// The filter text applies to every entry, also to the failed ones.
 func (m *pullsModel) visible() []int {
 	var out []int
 	for i, e := range m.entries {
+		if !m.matches(e) {
+			continue
+		}
 		if e.Err != nil {
 			out = append(out, i)
 			continue
@@ -179,6 +215,7 @@ func (m *pullsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.input.Width = max(msg.Width-len(m.input.Prompt)-2, 10)
+		m.filter.Width = max(msg.Width-len(m.filter.Prompt)-2, 10)
 		return m, nil
 	case pullsLoadedMsg:
 		m.loading = false
@@ -197,6 +234,9 @@ func (m *pullsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inputOn {
 			return m.updateInput(msg)
 		}
+		if m.filterOn {
+			return m.updateFilter(msg)
+		}
 		return m.updateKeys(msg)
 	case tea.MouseMsg:
 		m.updateMouse(msg)
@@ -205,6 +245,11 @@ func (m *pullsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.inputOn {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
+	if m.filterOn {
+		var cmd tea.Cmd
+		m.filter, cmd = m.filter.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -284,6 +329,16 @@ func (m *pullsModel) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputOn = true
 		m.input.Reset()
 		return m, m.input.Focus()
+	case "/":
+		m.filterOn = true
+		m.filter.CursorEnd()
+		return m, m.filter.Focus()
+	case "esc":
+		if m.filterText() != "" {
+			m.filter.Reset()
+			m.clampCursor()
+			m.statusMsg = "filter cleared"
+		}
 	case "u":
 		if i := m.selected(); i >= 0 {
 			e := m.entries[i]
@@ -404,6 +459,31 @@ func (m *pullsModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// updateFilter handles the keys while the filter input has the focus. The
+// list filters as the user types. Enter keeps the filter and returns to the
+// list. Esc clears the filter and returns to the list.
+func (m *pullsModel) updateFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.errMsg = ""
+	m.statusMsg = ""
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.filterOn = false
+		m.filter.Blur()
+		m.filter.Reset()
+		m.clampCursor()
+		return m, nil
+	case "enter":
+		m.filterOn = false
+		m.filter.Blur()
+		m.clampCursor()
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.filter, cmd = m.filter.Update(msg)
+	m.clampCursor()
+	return m, cmd
+}
+
 // items draws every visible pull request as a block of rows.
 func (m *pullsModel) items() [][]string {
 	vis := m.visible()
@@ -429,6 +509,9 @@ func (m *pullsModel) frame() frame {
 	if m.showMine {
 		header += " · mine only"
 	}
+	if q := m.filterText(); q != "" && !m.filterOn {
+		header += fmt.Sprintf(" · filter %q", q)
+	}
 	if !m.refreshedAt.IsZero() {
 		header += " · refreshed " + m.refreshedAt.Local().Format("15:04:05")
 	}
@@ -440,11 +523,20 @@ func (m *pullsModel) frame() frame {
 		errMsg:       m.errMsg,
 		status:       m.statusMsg,
 		helpExpanded: m.helpOn,
-		help:         "j/k move · c commit · C commit all · s subscribe · u unsubscribe · o open · r refresh · a toggle all · y toggle mine · m toggle comments",
+		help:         "j/k move · c commit · C commit all · s subscribe · u unsubscribe · o open · r refresh · / filter · a toggle all · y toggle mine · m toggle comments",
 	}
-	if m.inputOn {
+	if m.filterText() != "" {
+		f.help += " · esc clear filter"
+	}
+	switch {
+	case m.inputOn:
 		f.input = m.input.View()
 		f.help = "enter subscribe · esc cancel"
+		f.helpExpanded = false
+		f.noTail = true
+	case m.filterOn:
+		f.input = m.filter.View()
+		f.help = "enter keep filter · esc clear filter"
 		f.helpExpanded = false
 		f.noTail = true
 	}
@@ -461,6 +553,8 @@ func (m *pullsModel) View() string {
 		body = []string{dimStyle.Render("loading…")}
 	case len(m.entries) == 0:
 		body = []string{dimStyle.Render("no watched pull requests · press s to subscribe")}
+	case len(items) == 0 && m.filterText() != "":
+		body = []string{dimStyle.Render("no pull requests match the filter · press esc to clear it")}
 	case len(items) == 0 && m.showMine:
 		body = []string{dimStyle.Render("no pull requests of yours to show · press y to show every author")}
 	case len(items) == 0:

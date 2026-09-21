@@ -57,11 +57,14 @@ By default the watch shows only pull requests with updates. Comments from you, f
 | `u` | unsubscribe the selected pull request |
 | `o` | open the selected pull request in the browser |
 | `r` | refresh now |
+| `/` | filter the list by title, repo, number, author, or url |
 | `a` | show every pull request, or only those with updates |
 | `y` | show only your own pull requests, or those from every author |
 | `m` | show or hide the text of new comments |
 | `?` | expand or collapse the help |
 | `q` | quit |
+
+The filter is a case-insensitive substring match. The list filters as you type. Press `enter` to keep the filter and return to the list, or `esc` to clear it. The header shows the active filter, and `esc` in the list clears it.
 
 The commit is per pull request. The JavaScript tool committed every pull request at once.
 

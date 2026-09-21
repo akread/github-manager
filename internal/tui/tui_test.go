@@ -152,6 +152,77 @@ func TestPullsMineFilter(t *testing.T) {
 	}
 }
 
+func TestPullsFilter(t *testing.T) {
+	m, _ := newTestPulls(t)
+	run(m, key("a")) // show every pull request so the filter is the only cut
+	run(m, key("/"))
+	if !m.filterOn {
+		t.Fatal("/ must open the filter input")
+	}
+	v := plain(m.View())
+	if !strings.Contains(v, "filter: ") || lastLine(v) != "enter keep filter · esc clear filter" {
+		t.Fatalf("filter input: %s", v)
+	}
+	// the list filters as the user types, case-insensitive, on the title
+	for _, r := range "TITLE 2" {
+		run(m, key(string(r)))
+	}
+	v = plain(m.View())
+	if !strings.Contains(v, "Title 2") || strings.Contains(v, "Title 1") || strings.Contains(v, "Title 3") {
+		t.Fatalf("filter while typing: %s", v)
+	}
+	// enter keeps the filter, closes the input, and names it in the header
+	run(m, key("enter"))
+	v = plain(m.View())
+	if m.filterOn || !strings.Contains(v, `filter "TITLE 2"`) || strings.Contains(v, "Title 1") {
+		t.Fatalf("filter kept: %s", v)
+	}
+	if h := m.frame().help; !strings.HasSuffix(h, "esc clear filter") {
+		t.Fatalf("help must show how to clear the filter: %q", h)
+	}
+	// the selected item is the one that matches
+	if i := m.selected(); i < 0 || m.entries[i].Pull.Number != 2 {
+		t.Fatalf("selected: %d", i)
+	}
+	// esc in the list clears the filter
+	run(m, key("esc"))
+	v = plain(m.View())
+	if m.filterText() != "" || strings.Contains(v, "filter \"") || !strings.Contains(v, "Title 1") || m.statusMsg != "filter cleared" {
+		t.Fatalf("filter cleared: %s", v)
+	}
+
+	// no match shows a hint; the filter also matches the url and the author
+	run(m, key("/"))
+	for _, r := range "zzz" {
+		run(m, key(string(r)))
+	}
+	if !strings.Contains(plain(m.View()), "no pull requests match the filter") {
+		t.Fatalf("no match: %s", plain(m.View()))
+	}
+	// esc in the input clears the filter and closes the input
+	run(m, key("esc"))
+	if m.filterOn || m.filterText() != "" {
+		t.Fatal("esc must clear the filter and close the input")
+	}
+	run(m, key("/"))
+	for _, r := range "pull/3" {
+		run(m, key(string(r)))
+	}
+	v = plain(m.View())
+	if !strings.Contains(v, "Title 3") || strings.Contains(v, "Title 1") {
+		t.Fatalf("url filter: %s", v)
+	}
+	run(m, key("esc"))
+	run(m, key("/"))
+	for _, r := range "@alice" {
+		run(m, key(string(r)))
+	}
+	if v := plain(m.View()); !strings.Contains(v, "Title 1") || !strings.Contains(v, "Title 3") {
+		t.Fatalf("author filter: %s", v)
+	}
+	run(m, key("esc"))
+}
+
 func TestPullsCommitSelected(t *testing.T) {
 	m, st := newTestPulls(t)
 	run(m, key("j")) // cursor on Title 3
