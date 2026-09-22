@@ -46,6 +46,8 @@ ghw reviews watch [--expanded]
 
 Each subscription has a commit point. The watch shows activity after that point as new: comments, review comments, approvals, and requested changes. A pull request also counts as an update when it is closed, or when a review request for you arrives after that point. After a commit the `Review requested` row stays in the dim style until you submit the review.
 
+A pull request in a merge queue shows `[QUEUED]` in place of `[OPEN]`, with its position and the state of the queue entry. On a branch with a merge queue, gh ignores the merge method: the queue applies the method from the branch rule, and the pull request stays open until the queue merges it.
+
 By default the watch shows only pull requests with updates. Comments from you, from non-user accounts, and from the excluded usernames of the domain are ignored. Your own pull requests show your username underlined. Press `A` to show only those.
 
 | Key | Action |
@@ -56,6 +58,7 @@ By default the watch shows only pull requests with updates. Comments from you, f
 | `s` | subscribe to a pull request url |
 | `u` | unsubscribe the selected pull request |
 | `o` | open the selected pull request in the browser |
+| `M` | merge the selected pull request with `gh pr merge`. A prompt asks for the method: `m` merge, `s` squash, `r` rebase, or `esc` to cancel. A second prompt asks `are you sure`; press `y` to merge, or `n` to cancel. The repository settings decide whether the method is allowed and whether the branch is deleted. After the merge the watch reloads that pull request and reports the result: `merged`, or `added to the merge queue` when the base branch has a merge queue. |
 | `r` | refresh now |
 | `/` | filter the list by title, repo, number, author, or url |
 | `a` | show every pull request, or only those with updates |

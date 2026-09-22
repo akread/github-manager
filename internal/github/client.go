@@ -77,6 +77,48 @@ func (c *Client) Username(domain string) (string, error) {
 	return u, nil
 }
 
+// MergePull merges a pull request. The method is one of merge, squash, or
+// rebase. gh pr merge does the work, so the repository settings decide
+// whether the method is allowed and whether the branch is deleted.
+func (c *Client) MergePull(ref PullRef, method string) error {
+	switch method {
+	case "merge", "squash", "rebase":
+	default:
+		return fmt.Errorf("merge %s#%d: unknown method %q", ref.Repo, ref.Number, method)
+	}
+	_, _, err := c.run("pr", "merge", fmt.Sprint(ref.Number), "--repo", ref.Domain+"/"+ref.Repo, "--"+method)
+	return err
+}
+
+// mergeQueue fetches the merge queue state of a pull request with GraphQL.
+// A host whose schema has no merge queue fields, such as an older GitHub
+// Enterprise Server, gives an empty result and no error.
+func (c *Client) mergeQueue(ref PullRef) (rawQueue, error) {
+	owner, name, ok := strings.Cut(ref.Repo, "/")
+	if !ok {
+		return rawQueue{}, fmt.Errorf("merge queue: invalid repo %q", ref.Repo)
+	}
+	query := fmt.Sprintf(`{ repository(owner:%q, name:%q) { pullRequest(number:%d) { isInMergeQueue isMergeQueueEnabled mergeQueueEntry { state position } } } }`, owner, name, ref.Number)
+	stdout, stderr, err := c.run("api", "graphql", "--hostname", ref.Domain, "-f", "query="+query)
+	if err != nil {
+		if strings.Contains(string(stderr)+err.Error(), "doesn't exist on type") {
+			return rawQueue{}, nil
+		}
+		return rawQueue{}, err
+	}
+	var resp struct {
+		Data struct {
+			Repository struct {
+				PullRequest rawQueue `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout, &resp); err != nil {
+		return rawQueue{}, fmt.Errorf("decode merge queue: %w", err)
+	}
+	return resp.Data.Repository.PullRequest, nil
+}
+
 // requiredChecks lists the states of the required checks on a pull request.
 // A pull request with no required checks gives an empty list.
 func (c *Client) requiredChecks(ref PullRef) ([]rawCheck, error) {

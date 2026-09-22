@@ -1,6 +1,8 @@
 package github
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -167,5 +169,65 @@ func TestReduceChecks(t *testing.T) {
 		if got := reduceChecks(checks); got != c.want {
 			t.Errorf("%v: got %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestMergePull(t *testing.T) {
+	var got [][]string
+	c := &Client{run: func(args ...string) ([]byte, []byte, error) {
+		got = append(got, args)
+		return nil, nil, nil
+	}, users: map[string]string{}}
+	ref := PullRef{URL: "https://github.com/o/r/pull/12", Domain: "github.com", Repo: "o/r", Number: 12}
+	if err := c.MergePull(ref, "squash"); err != nil {
+		t.Fatal(err)
+	}
+	want := "pr merge 12 --repo github.com/o/r --squash"
+	if len(got) != 1 || strings.Join(got[0], " ") != want {
+		t.Fatalf("args: %v, want %q", got, want)
+	}
+	if err := c.MergePull(ref, "delete-branch"); err == nil || len(got) != 1 {
+		t.Fatalf("unknown method must fail before gh runs: err=%v calls=%d", err, len(got))
+	}
+}
+
+func TestMergeQueue(t *testing.T) {
+	var got []string
+	out := `{"data":{"repository":{"pullRequest":{"isInMergeQueue":true,"isMergeQueueEnabled":true,"mergeQueueEntry":{"state":"AWAITING_CHECKS","position":3}}}}}`
+	c := &Client{run: func(args ...string) ([]byte, []byte, error) {
+		got = args
+		return []byte(out), nil, nil
+	}, users: map[string]string{}}
+	ref := PullRef{Domain: "github.com", Repo: "o/r", Number: 12}
+	q, err := c.mergeQueue(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !q.InQueue || !q.QueueEnabled || q.Entry == nil || q.Entry.State != "AWAITING_CHECKS" || q.Entry.Position != 3 {
+		t.Fatalf("queue: %+v", q)
+	}
+	want := []string{"api", "graphql", "--hostname", "github.com", "-f"}
+	if len(got) != 6 || strings.Join(got[:5], " ") != strings.Join(want, " ") {
+		t.Fatalf("args: %v", got)
+	}
+	if !strings.Contains(got[5], `repository(owner:"o", name:"r")`) || !strings.Contains(got[5], "pullRequest(number:12)") {
+		t.Fatalf("query: %s", got[5])
+	}
+
+	// a host without merge queue fields gives an empty result
+	c.run = func(args ...string) ([]byte, []byte, error) {
+		return nil, []byte(`Field 'isInMergeQueue' doesn't exist on type 'PullRequest'`), errors.New("gh api graphql: exit status 1")
+	}
+	if q, err := c.mergeQueue(ref); err != nil || q.InQueue {
+		t.Fatalf("missing schema: q=%+v err=%v", q, err)
+	}
+	c.run = func(args ...string) ([]byte, []byte, error) { return nil, nil, errors.New("network down") }
+	if _, err := c.mergeQueue(ref); err == nil {
+		t.Fatal("other errors must surface")
+	}
+
+	s := derivePull(ref, pullData{pull: rawPull{State: "open"}, queue: q}, time.Time{}, time.Time{}, nil)
+	if !s.InMergeQueue || s.QueueState != "AWAITING_CHECKS" || s.QueuePosition != 3 {
+		t.Fatalf("status: %+v", s)
 	}
 }

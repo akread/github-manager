@@ -34,6 +34,9 @@ type PullsOptions struct {
 	Mine       bool // show only the pull requests of the authenticated user
 	// Open opens a URL in the browser. Nil means the system default.
 	Open func(url string) error
+	// Merge merges a pull request with a method: merge, squash, or rebase.
+	// Nil disables the merge shortcut.
+	Merge func(ref github.PullRef, method string) error
 }
 
 // PullLoader returns a Load function that uses the gh client. It fetches up
@@ -73,7 +76,14 @@ type pullsLoadedMsg struct {
 }
 
 type pullLoadedMsg struct {
-	entry PullEntry
+	entry      PullEntry
+	afterMerge bool // the reload follows a merge started with M
+}
+
+// pullMergedMsg reports the result of a merge started with M.
+type pullMergedMsg struct {
+	pull store.Pull
+	err  error
 }
 
 type pullsModel struct {
@@ -94,6 +104,10 @@ type pullsModel struct {
 
 	filter   textinput.Model // the text to match; it stays set after the input closes
 	filterOn bool            // the filter input has the focus
+
+	mergeOn     bool       // the merge prompt is open
+	mergePull   store.Pull // the pull request the merge prompt is for
+	mergeMethod string     // the chosen method; empty while the prompt waits for one
 
 	errMsg    string
 	statusMsg string
@@ -229,10 +243,18 @@ func (m *pullsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case pullLoadedMsg:
 		m.upsert(msg.entry)
+		if msg.afterMerge {
+			m.reportMerge(msg.entry)
+		}
 		return m, nil
+	case pullMergedMsg:
+		return m, m.merged(msg)
 	case tea.KeyMsg:
 		if m.inputOn {
 			return m.updateInput(msg)
+		}
+		if m.mergeOn {
+			return m.updateMerge(msg)
 		}
 		if m.filterOn {
 			return m.updateFilter(msg)
@@ -257,7 +279,7 @@ func (m *pullsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // updateMouse scrolls on the wheel and moves the cursor on a left click.
 func (m *pullsModel) updateMouse(msg tea.MouseMsg) {
-	if m.inputOn {
+	if m.inputOn || m.mergeOn {
 		return
 	}
 	items := m.items()
@@ -329,6 +351,10 @@ func (m *pullsModel) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputOn = true
 		m.input.Reset()
 		return m, m.input.Focus()
+	case "M":
+		if i := m.selected(); i >= 0 {
+			m.openMerge(i)
+		}
 	case "/":
 		m.filterOn = true
 		m.filter.CursorEnd()
@@ -421,6 +447,101 @@ func (m *pullsModel) commitAll() {
 	m.entries = kept
 	m.clampCursor()
 	m.statusMsg = fmt.Sprintf("committed %s, unsubscribed %s", plural(committed, "pull request"), plural(closed, "closed pull request"))
+}
+
+// openMerge opens the merge prompt for one pull request. Only an open pull
+// request whose last refresh succeeded can be merged.
+func (m *pullsModel) openMerge(i int) {
+	e := m.entries[i]
+	switch {
+	case m.o.Merge == nil:
+		m.errMsg = "merge is not available"
+	case e.Err != nil || e.Status == nil:
+		m.errMsg = "cannot merge: the last refresh of this pull request failed"
+	case e.Status.Merged:
+		m.errMsg = "cannot merge: the pull request is already merged"
+	case e.Status.InMergeQueue:
+		m.errMsg = "cannot merge: the pull request is already in the merge queue"
+	case e.Status.State != "open":
+		m.errMsg = "cannot merge: the pull request is not open"
+	default:
+		m.mergeOn = true
+		m.mergePull = e.Pull
+		m.mergeMethod = ""
+	}
+}
+
+// updateMerge handles the keys while the merge prompt is open. The prompt
+// has two steps: a method key chooses the method, then y confirms and
+// starts the merge in the background. Esc closes the prompt in both steps.
+func (m *pullsModel) updateMerge(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c", "q", "n":
+		m.mergeOn = false
+		return m, nil
+	}
+	if m.mergeMethod == "" {
+		switch msg.String() {
+		case "m":
+			m.mergeMethod = "merge"
+		case "s":
+			m.mergeMethod = "squash"
+		case "r":
+			m.mergeMethod = "rebase"
+		}
+		return m, nil
+	}
+	if msg.String() != "y" {
+		return m, nil
+	}
+	m.mergeOn = false
+	p, method := m.mergePull, m.mergeMethod
+	m.statusMsg = fmt.Sprintf("merging %s#%d (%s)…", p.Repo, p.Number, method)
+	merge := m.o.Merge
+	return m, func() tea.Msg {
+		ref := github.PullRef{URL: p.URL, Domain: p.Domain, Repo: p.Repo, Number: p.Number}
+		return pullMergedMsg{pull: p, err: merge(ref, method)}
+	}
+}
+
+// merged shows the result of a merge. After a success it reloads the pull
+// request, so the list shows its new state: merged, or queued when the base
+// branch has a merge queue.
+func (m *pullsModel) merged(msg pullMergedMsg) tea.Cmd {
+	label := fmt.Sprintf("%s#%d", msg.pull.Repo, msg.pull.Number)
+	if msg.err != nil {
+		m.statusMsg = ""
+		m.errMsg = "merge " + label + ": " + msg.err.Error()
+		return nil
+	}
+	m.errMsg = ""
+	m.statusMsg = "merge accepted for " + label + " · refreshing…"
+	load := m.o.Load
+	p := msg.pull
+	return func() tea.Msg {
+		return pullLoadedMsg{entry: load([]store.Pull{p})[0], afterMerge: true}
+	}
+}
+
+// reportMerge sets the status row from the state of a pull request after a
+// merge. gh adds the pull request to the merge queue when the base branch
+// has one, so the pull request is then open and queued, not merged.
+func (m *pullsModel) reportMerge(e PullEntry) {
+	label := fmt.Sprintf("%s#%d", e.Pull.Repo, e.Pull.Number)
+	switch {
+	case e.Err != nil || e.Status == nil:
+		m.statusMsg = "merge accepted for " + label
+		m.errMsg = "refresh after merge failed"
+		if e.Err != nil {
+			m.errMsg += ": " + e.Err.Error()
+		}
+	case e.Status.Merged:
+		m.statusMsg = "merged " + label
+	case e.Status.InMergeQueue:
+		m.statusMsg = "added " + label + " to the merge queue"
+	default:
+		m.statusMsg = "merge accepted for " + label + " · not merged yet"
+	}
 }
 
 func (m *pullsModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -526,7 +647,7 @@ func (m *pullsModel) frame() frame {
 		errMsg:       m.errMsg,
 		status:       m.statusMsg,
 		helpExpanded: m.helpOn,
-		help:         "c commit · s subscribe · o open · r refresh · / filter · a toggle all · A toggle mine · m toggle comments",
+		help:         "c commit · s subscribe · o open · M merge · r refresh · / filter · a toggle all · A toggle mine · m toggle comments",
 		moreHelp:     "j/k move · C commit all · u unsubscribe",
 	}
 	if m.filterText() != "" {
@@ -542,6 +663,18 @@ func (m *pullsModel) frame() frame {
 	case m.filterOn:
 		f.input = m.filter.View()
 		f.help = "enter keep filter · esc clear filter"
+		f.moreHelp = ""
+		f.helpExpanded = false
+		f.noTail = true
+	case m.mergeOn && m.mergeMethod == "":
+		f.input = fmt.Sprintf("merge %s#%d with:", m.mergePull.Repo, m.mergePull.Number)
+		f.help = "m merge · s squash · r rebase · esc cancel"
+		f.moreHelp = ""
+		f.helpExpanded = false
+		f.noTail = true
+	case m.mergeOn:
+		f.input = fmt.Sprintf("are you sure you want to %s %s#%d?", m.mergeMethod, m.mergePull.Repo, m.mergePull.Number)
+		f.help = "y merge · n cancel"
 		f.moreHelp = ""
 		f.helpExpanded = false
 		f.noTail = true
@@ -596,6 +729,8 @@ func (m *pullsModel) renderPull(e PullEntry, selected bool) []string {
 		state = redStyle.Render("[CLOSED]")
 	case s.Draft:
 		state = dimItalic.Render("[DRAFT]")
+	case s.InMergeQueue:
+		state = cyanStyle.Render("[QUEUED]")
 	default:
 		state = greenStyle.Render("[OPEN]")
 	}
@@ -614,6 +749,16 @@ func (m *pullsModel) renderPull(e PullEntry, selected bool) []string {
 		rows = append(rows, indent+magentaStyle.Render(s.MergeCommit))
 	}
 	rows = append(rows, indent+dimStyle.Render(e.Pull.URL))
+	if s.InMergeQueue {
+		text := "In the merge queue"
+		if s.QueuePosition > 0 {
+			text += fmt.Sprintf(" · position %d", s.QueuePosition)
+		}
+		if s.QueueState != "" {
+			text += " · " + strings.ToLower(strings.ReplaceAll(s.QueueState, "_", " "))
+		}
+		rows = append(rows, indent+cyanStyle.Render(text))
+	}
 
 	comment := func(c github.Comment) {
 		body := strings.Join(strings.Fields(c.Body), " ")

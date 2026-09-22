@@ -28,6 +28,7 @@ var (
 	redStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Italic(true)
 	greenStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Italic(true)
 	magentaStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("13")).Italic(true)
+	cyanStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Italic(true)
 	orangeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Italic(true)
 	dimItalic     = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
 	bulletStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)

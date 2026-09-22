@@ -52,6 +52,19 @@ type rawCheck struct {
 	State string `json:"state"`
 }
 
+// rawQueue is the merge queue view of a pull request, from GraphQL. The
+// REST API does not report it.
+type rawQueue struct {
+	InQueue      bool           `json:"isInMergeQueue"`
+	QueueEnabled bool           `json:"isMergeQueueEnabled"` // the base branch has a merge queue
+	Entry        *rawQueueEntry `json:"mergeQueueEntry"`     // nil when not in the queue
+}
+
+type rawQueueEntry struct {
+	State    string `json:"state"` // AWAITING_CHECKS, LOCKED, MERGEABLE, QUEUED, UNMERGEABLE
+	Position int    `json:"position"`
+}
+
 // pullData is everything fetched for one pull request.
 type pullData struct {
 	pull           rawPull
@@ -59,6 +72,7 @@ type pullData struct {
 	reviewComments []rawComment
 	timeline       []rawEvent
 	checks         []rawCheck
+	queue          rawQueue
 	username       string
 }
 
@@ -104,6 +118,11 @@ type PullStatus struct {
 	NewChangesRequested int
 
 	CheckState string // one of the Check constants
+
+	InMergeQueue  bool   // the pull request waits in the merge queue of its base branch
+	QueueEnabled  bool   // the base branch has a merge queue; the queue sets the merge method
+	QueueState    string // the entry state, such as AWAITING_CHECKS; empty when not in the queue
+	QueuePosition int    // 1-based position in the queue; 0 when unknown
 }
 
 // HasUpdates reports whether the pull request has activity to show.
@@ -194,6 +213,11 @@ func (c *Client) LoadPull(ref PullRef, since time.Time, excluded []string) (*Pul
 			return err
 		},
 		func() error {
+			q, err := c.mergeQueue(ref)
+			d.queue = q
+			return err
+		},
+		func() error {
 			u, err := c.Username(ref.Domain)
 			d.username = u
 			return err
@@ -260,6 +284,12 @@ func derivePull(ref PullRef, d pullData, since, fetchedAt time.Time, excluded []
 		Comments:       toComments(d.comments),
 		ReviewComments: toComments(d.reviewComments),
 		CheckState:     reduceChecks(d.checks),
+		InMergeQueue:   d.queue.InQueue,
+		QueueEnabled:   d.queue.QueueEnabled,
+	}
+	if d.queue.Entry != nil {
+		s.QueueState = d.queue.Entry.State
+		s.QueuePosition = d.queue.Entry.Position
 	}
 	// the events are oldest first, so the last request, removal, or review
 	// by the user gives the current state, and the time of the request says

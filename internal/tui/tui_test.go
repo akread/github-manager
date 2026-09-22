@@ -343,6 +343,164 @@ func TestPullsUnsubscribeAndError(t *testing.T) {
 	}
 }
 
+func TestPullsMerge(t *testing.T) {
+	m, _ := newTestPulls(t)
+	var got []string
+	merged := false // the fake loader reports the pull request as merged
+	m.o.Merge = func(ref github.PullRef, method string) error {
+		got = append(got, ref.Repo+"#"+string(rune('0'+ref.Number))+" "+method)
+		if method == "rebase" {
+			return errors.New("not allowed")
+		}
+		merged = true
+		return nil
+	}
+	m.o.Load = func(pulls []store.Pull) []PullEntry {
+		out := fakePullLoader(pulls)
+		for i := range out {
+			if merged && out[i].Status != nil {
+				out[i].Status.Merged = true
+				out[i].Status.State = "closed"
+			}
+		}
+		return out
+	}
+
+	// esc cancels the prompt without a merge
+	run(m, key("M"))
+	if !m.mergeOn {
+		t.Fatal("M must open the merge prompt")
+	}
+	v := plain(m.View())
+	if !strings.Contains(v, "merge o/r#1 with:") || !strings.Contains(v, "s squash") {
+		t.Fatalf("merge prompt: %s", v)
+	}
+	run(m, key("esc"))
+	if m.mergeOn || len(got) != 0 {
+		t.Fatalf("esc must cancel: on=%v calls=%v", m.mergeOn, got)
+	}
+
+	// an unknown key keeps the prompt open
+	run(m, key("M"))
+	run(m, key("x"))
+	if !m.mergeOn || len(got) != 0 {
+		t.Fatalf("unknown key must keep the prompt: on=%v calls=%v", m.mergeOn, got)
+	}
+
+	// a method key asks for a confirmation; n cancels without a merge
+	run(m, key("s"))
+	if !m.mergeOn || m.mergeMethod != "squash" {
+		t.Fatalf("method key: on=%v method=%q", m.mergeOn, m.mergeMethod)
+	}
+	v = plain(m.View())
+	if !strings.Contains(v, "are you sure you want to squash o/r#1?") || !strings.Contains(v, "y merge · n cancel") {
+		t.Fatalf("confirm prompt: %s", v)
+	}
+	run(m, key("n"))
+	if m.mergeOn || len(got) != 0 {
+		t.Fatalf("n must cancel: on=%v calls=%v", m.mergeOn, got)
+	}
+
+	// y confirms: the merge runs with squash and reloads the pull request
+	run(m, key("M"))
+	run(m, key("s"))
+	run(m, key("x"))
+	if !m.mergeOn || len(got) != 0 {
+		t.Fatalf("unknown key must keep the confirmation: on=%v calls=%v", m.mergeOn, got)
+	}
+	run(m, key("y"))
+	if m.mergeOn {
+		t.Fatal("y must close the prompt")
+	}
+	if len(got) != 1 || got[0] != "o/r#1 squash" {
+		t.Fatalf("merge calls: %v", got)
+	}
+	if m.statusMsg != "merged o/r#1" || m.errMsg != "" {
+		t.Fatalf("status=%q err=%q", m.statusMsg, m.errMsg)
+	}
+	if v := plain(m.View()); !strings.Contains(v, "[MERGED] Title 1") {
+		t.Fatalf("the merged pull request must be reloaded: %s", v)
+	}
+	merged = false
+
+	// a merge error shows in the error row; the reload makes the pull
+	// request open again, so M is allowed
+	run(m, key("r"))
+	run(m, key("M"))
+	run(m, key("r"))
+	run(m, key("y"))
+	if len(got) != 2 || got[1] != "o/r#1 rebase" {
+		t.Fatalf("merge calls: %v", got)
+	}
+	if !strings.Contains(m.errMsg, "merge o/r#1: not allowed") || m.statusMsg != "" {
+		t.Fatalf("status=%q err=%q", m.statusMsg, m.errMsg)
+	}
+}
+
+func TestPullsMergeQueue(t *testing.T) {
+	m, _ := newTestPulls(t)
+	queued := false // the fake loader reports the pull request as queued
+	m.o.Merge = func(github.PullRef, string) error { queued = true; return nil }
+	m.o.Load = func(pulls []store.Pull) []PullEntry {
+		out := fakePullLoader(pulls)
+		for i := range out {
+			if queued && out[i].Status != nil {
+				out[i].Status.InMergeQueue = true
+				out[i].Status.QueueEnabled = true
+				out[i].Status.QueueState = "AWAITING_CHECKS"
+				out[i].Status.QueuePosition = 2
+			}
+		}
+		return out
+	}
+	run(m, key("M"))
+	run(m, key("s"))
+	run(m, key("y"))
+	if m.statusMsg != "added o/r#1 to the merge queue" || m.errMsg != "" {
+		t.Fatalf("status=%q err=%q", m.statusMsg, m.errMsg)
+	}
+	v := plain(m.View())
+	if !strings.Contains(v, "[QUEUED] Title 1") || strings.Contains(v, "[OPEN] Title 1") {
+		t.Fatalf("queued state: %s", v)
+	}
+	if !strings.Contains(v, "In the merge queue · position 2 · awaiting checks") {
+		t.Fatalf("queue row: %s", v)
+	}
+	run(m, key("M"))
+	if m.mergeOn || m.errMsg != "cannot merge: the pull request is already in the merge queue" {
+		t.Fatalf("queued entry: on=%v err=%q", m.mergeOn, m.errMsg)
+	}
+}
+
+func TestPullsMergeGuards(t *testing.T) {
+	m, st := newTestPulls(t)
+	run(m, key("M"))
+	if m.mergeOn || m.errMsg != "merge is not available" {
+		t.Fatalf("nil Merge: on=%v err=%q", m.mergeOn, m.errMsg)
+	}
+	m.o.Merge = func(github.PullRef, string) error { t.Fatal("merge must not run"); return nil }
+
+	st.SubscribePull(store.Pull{URL: "https://github.com/o/r/pull/broken", Domain: "github.com", Repo: "o/r", Number: 7})
+	run(m, key("r"))
+	run(m, key("G"))
+	run(m, key("M"))
+	if m.mergeOn || !strings.Contains(m.errMsg, "last refresh of this pull request failed") {
+		t.Fatalf("failed entry: on=%v err=%q", m.mergeOn, m.errMsg)
+	}
+
+	run(m, key("g"))
+	m.entries[m.selected()].Status.State = "closed"
+	run(m, key("M"))
+	if m.mergeOn || m.errMsg != "cannot merge: the pull request is not open" {
+		t.Fatalf("closed entry: on=%v err=%q", m.mergeOn, m.errMsg)
+	}
+	m.entries[m.selected()].Status.Merged = true
+	run(m, key("M"))
+	if m.mergeOn || m.errMsg != "cannot merge: the pull request is already merged" {
+		t.Fatalf("merged entry: on=%v err=%q", m.mergeOn, m.errMsg)
+	}
+}
+
 func fakeReviewLoader(repos []store.Repo) []ReviewEntry {
 	out := make([]ReviewEntry, len(repos))
 	for i, r := range repos {

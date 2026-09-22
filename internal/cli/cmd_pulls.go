@@ -129,8 +129,8 @@ var pullsWatchCmd = &cobra.Command{
 	Long: `Opens the terminal UI. It refreshes every refresh_interval (default 5m).
 
 Keys: j/k move, c commit the selected pull request, C commit all, s subscribe
-a url, u unsubscribe, o open in the browser, r refresh, a show all or only
-updates, A show only your own pull requests or every author, m show or hide
+a url, u unsubscribe, o open in the browser, M merge with gh pr merge after a
+prompt for the method and a confirmation, r refresh, a show all or only updates, A show only your own pull requests or every author, m show or hide
 comment text, ? expand or collapse the help, q quit.
 
 The help is one row; items that do not fit are cut, and "? help" appears at
@@ -147,9 +147,11 @@ to wrap every item onto more rows.`,
 			return err
 		}
 		defer st.Close()
+		client := github.NewClient()
 		return tui.RunPulls(tui.PullsOptions{
 			Store:      st,
-			Load:       tui.PullLoader(github.NewClient(), cfg.Excluded),
+			Load:       tui.PullLoader(client, cfg.Excluded),
+			Merge:      client.MergePull,
 			Interval:   interval,
 			Expanded:   pullsWatchExpanded,
 			NoComments: pullsWatchNoComments,
