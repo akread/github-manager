@@ -27,11 +27,11 @@ type PullsOptions struct {
 	Store *store.Store
 	// Load fetches the status of each pull request. The result has one
 	// entry per input, in the same order.
-	Load     func(pulls []store.Pull) []PullEntry
-	Interval time.Duration
-	Expanded bool // show every pull request, not only those with updates
-	Comments bool // show the text of new comments
-	Mine     bool // show only the pull requests of the authenticated user
+	Load       func(pulls []store.Pull) []PullEntry
+	Interval   time.Duration
+	Expanded   bool // show every pull request, not only those with updates
+	NoComments bool // hide the text of new comments
+	Mine       bool // show only the pull requests of the authenticated user
 	// Open opens a URL in the browser. Nil means the system default.
 	Open func(url string) error
 }
@@ -117,7 +117,7 @@ func newPullsModel(o PullsOptions) *pullsModel {
 	fi.Prompt = "filter: "
 	fi.Placeholder = "title, repo, number, author, or url"
 	fi.Cursor.SetMode(cursor.CursorStatic)
-	return &pullsModel{o: o, showAll: o.Expanded, showComments: o.Comments, showMine: o.Mine, input: ti, filter: fi}
+	return &pullsModel{o: o, showAll: o.Expanded, showComments: !o.NoComments, showMine: o.Mine, input: ti, filter: fi}
 }
 
 func (m *pullsModel) Init() tea.Cmd {
@@ -316,7 +316,7 @@ func (m *pullsModel) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 	case "m":
 		m.showComments = !m.showComments
-	case "y":
+	case "A":
 		m.showMine = !m.showMine
 		m.clampCursor()
 	case "c":
@@ -509,6 +509,9 @@ func (m *pullsModel) frame() frame {
 	if m.showMine {
 		header += " · mine only"
 	}
+	if !m.showComments {
+		header += " · comments hidden"
+	}
 	if q := m.filterText(); q != "" && !m.filterOn {
 		header += fmt.Sprintf(" · filter %q", q)
 	}
@@ -523,7 +526,8 @@ func (m *pullsModel) frame() frame {
 		errMsg:       m.errMsg,
 		status:       m.statusMsg,
 		helpExpanded: m.helpOn,
-		help:         "j/k move · c commit · C commit all · s subscribe · u unsubscribe · o open · r refresh · / filter · a toggle all · y toggle mine · m toggle comments",
+		help:         "c commit · s subscribe · o open · r refresh · / filter · a toggle all · A toggle mine · m toggle comments",
+		moreHelp:     "j/k move · C commit all · u unsubscribe",
 	}
 	if m.filterText() != "" {
 		f.help += " · esc clear filter"
@@ -532,11 +536,13 @@ func (m *pullsModel) frame() frame {
 	case m.inputOn:
 		f.input = m.input.View()
 		f.help = "enter subscribe · esc cancel"
+		f.moreHelp = ""
 		f.helpExpanded = false
 		f.noTail = true
 	case m.filterOn:
 		f.input = m.filter.View()
 		f.help = "enter keep filter · esc clear filter"
+		f.moreHelp = ""
 		f.helpExpanded = false
 		f.noTail = true
 	}
@@ -556,7 +562,7 @@ func (m *pullsModel) View() string {
 	case len(items) == 0 && m.filterText() != "":
 		body = []string{dimStyle.Render("no pull requests match the filter · press esc to clear it")}
 	case len(items) == 0 && m.showMine:
-		body = []string{dimStyle.Render("no pull requests of yours to show · press y to show every author")}
+		body = []string{dimStyle.Render("no pull requests of yours to show · press A to show every author")}
 	case len(items) == 0:
 		body = []string{dimStyle.Render("no updates · press a to show every pull request")}
 	default:

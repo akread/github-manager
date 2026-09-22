@@ -113,9 +113,34 @@ func TestPullsViewAndToggle(t *testing.T) {
 	}
 }
 
+func TestPullsCommentsToggle(t *testing.T) {
+	m, _ := newTestPulls(t)
+	// the comment text shows by default, and the header says nothing
+	v := plain(m.View())
+	if !strings.Contains(v, "@bob: hello") || strings.Contains(v, "comments hidden") {
+		t.Fatalf("comments shown: %s", v)
+	}
+	run(m, key("m"))
+	v = plain(m.View())
+	if strings.Contains(v, "@bob: hello") || !strings.Contains(v, "comments hidden") || !strings.Contains(v, "1 new comment") {
+		t.Fatalf("comments hidden: %s", v)
+	}
+	run(m, key("m"))
+	if v := plain(m.View()); !strings.Contains(v, "@bob: hello") || strings.Contains(v, "comments hidden") {
+		t.Fatalf("comments shown again: %s", v)
+	}
+	// the flag starts the watch with the text hidden
+	m2 := newPullsModel(PullsOptions{Store: m.o.Store, Load: fakePullLoader, Interval: time.Hour, NoComments: true, Open: func(string) error { return nil }})
+	run(m2, tea.WindowSizeMsg{Width: 100, Height: 30})
+	run(m2, m2.refresh()())
+	if v := plain(m2.View()); strings.Contains(v, "@bob: hello") || !strings.Contains(v, "comments hidden") {
+		t.Fatalf("--no-comments: %s", v)
+	}
+}
+
 func TestPullsMineFilter(t *testing.T) {
 	m, _ := newTestPulls(t)
-	run(m, key("y"))
+	run(m, key("A"))
 	v := plain(m.View())
 	if !strings.Contains(v, "mine only") || !strings.Contains(v, "Title 3") || strings.Contains(v, "Title 1") {
 		t.Fatalf("mine only: %s", v)
@@ -126,16 +151,16 @@ func TestPullsMineFilter(t *testing.T) {
 	if strings.Contains(v, "Title 2") || !strings.Contains(v, "Title 3") {
 		t.Fatalf("mine only with all shown: %s", v)
 	}
-	run(m, key("y"))
+	run(m, key("A"))
 	v = plain(m.View())
 	if strings.Contains(v, "mine only") || !strings.Contains(v, "Title 1") || !strings.Contains(v, "Title 2") {
 		t.Fatalf("every author again: %s", v)
 	}
 	// no pull request of ours: the body says how to get back
-	run(m, key("y"))
+	run(m, key("A"))
 	m.entries[2].Status.Ours = false
 	v = plain(m.View())
-	if !strings.Contains(v, "press y to show every author") {
+	if !strings.Contains(v, "press A to show every author") {
 		t.Fatalf("empty mine: %s", v)
 	}
 	// a failed fetch always shows, because its author is unknown
@@ -470,25 +495,48 @@ func lastLine(v string) string {
 
 func TestHelpRow(t *testing.T) {
 	m, _ := newTestPulls(t)
-	// wide: one row, every item, only "q quit" at the right edge
+	// wide: one row, every default item, none cut. The move and commit all
+	// items are hidden, so the right edge reads "? help · q quit".
 	run(m, tea.WindowSizeMsg{Width: 160, Height: 30})
 	last := lastLine(plain(m.View()))
-	if !strings.Contains(last, "m toggle comments") || !strings.HasSuffix(last, quitTail) || strings.Contains(last, "? help") || strings.Contains(last, "…") {
+	if !strings.Contains(last, "m toggle comments") || !strings.HasSuffix(last, helpTail) || strings.Contains(last, "…") {
 		t.Fatalf("wide: %q", last)
+	}
+	if strings.Contains(last, "j/k move") || strings.Contains(last, "C commit all") || strings.Contains(last, "u unsubscribe") {
+		t.Fatalf("wide: the hidden items must not show: %q", last)
 	}
 	if ansi.StringWidth(last) != 160 {
 		t.Fatalf("wide: the tail must sit at the right edge, width %d", ansi.StringWidth(last))
 	}
-	// ? does nothing visible when nothing is cut
+	// ? shows the hidden items after the default ones
 	run(m, key("?"))
-	if lastLine(plain(m.View())) != last {
-		t.Fatalf("wide expanded: %q", lastLine(plain(m.View())))
+	v := plain(m.View())
+	joined := strings.Join(helpBlock(v), "\n")
+	flat := strings.ReplaceAll(joined, "\n", helpSep) // the rows break only between items
+	if !strings.Contains(flat, "m toggle comments · j/k move · C commit all · u unsubscribe") || strings.Contains(joined, "…") || !strings.HasSuffix(lastLine(v), helpTail) {
+		t.Fatalf("wide expanded: %q", joined)
+	}
+	if n := strings.Count(v, "\n"); n != 29 {
+		t.Fatalf("wide expanded view must fill the height exactly: %d newlines", n)
 	}
 	run(m, key("?"))
+	if lastLine(plain(m.View())) != last {
+		t.Fatalf("wide collapsed again: %q", lastLine(plain(m.View())))
+	}
+
+	// no hidden items and every item fits: only "q quit", and ? does nothing
+	f := frame{width: 160, help: "c commit · o open"}
+	if rows := f.helpRows(); len(rows) != 1 || !strings.HasSuffix(rows[0], quitTail) || strings.Contains(rows[0], "? help") {
+		t.Fatalf("no hidden items: %q", rows)
+	}
+	f.helpExpanded = true
+	if rows := f.helpRows(); len(rows) != 1 || !strings.HasSuffix(rows[0], quitTail) || strings.Contains(rows[0], "? help") {
+		t.Fatalf("no hidden items, expanded: %q", rows)
+	}
 
 	// narrow: still one row, the items cut, "? help · q quit" whole
 	run(m, tea.WindowSizeMsg{Width: 60, Height: 30})
-	v := plain(m.View())
+	v = plain(m.View())
 	last = lastLine(v)
 	if !strings.Contains(last, "…") || !strings.HasSuffix(last, helpTail) || ansi.StringWidth(last) != 60 {
 		t.Fatalf("narrow: %q", last)
@@ -512,8 +560,11 @@ func TestHelpRow(t *testing.T) {
 		t.Fatalf("expanded bottom row: %q", bottom)
 	}
 	above := strings.Join(block[:len(block)-1], "\n")
-	if strings.Contains(above, "? help") || strings.Contains(above, "q quit") || !strings.Contains(above, "j/k move") {
+	if strings.Contains(above, "? help") || strings.Contains(above, "q quit") {
 		t.Fatalf("expanded rows above: %q", above)
+	}
+	if joined := strings.Join(block, "\n"); !strings.Contains(joined, "j/k move") || !strings.Contains(joined, "C commit all") {
+		t.Fatalf("expanded help must show the hidden items: %q", joined)
 	}
 	if n := strings.Count(v, "\n"); n != 29 {
 		t.Fatalf("expanded view must fill the height exactly: %d newlines", n)
@@ -539,8 +590,8 @@ func TestHelpRow(t *testing.T) {
 	}
 	run(r, key("?"))
 	helpLines := helpBlock(plain(r.View()))
-	joined := strings.Join(helpLines, "\n")
-	if len(helpLines) < 2 || strings.Contains(joined, "…") || !strings.HasSuffix(helpLines[len(helpLines)-1], helpTail) || strings.Count(joined, "q quit") != 1 {
+	joined = strings.Join(helpLines, "\n")
+	if len(helpLines) < 2 || strings.Contains(joined, "…") || !strings.HasSuffix(helpLines[len(helpLines)-1], helpTail) || strings.Count(joined, "q quit") != 1 || !strings.Contains(joined, "C commit all") {
 		t.Fatalf("reviews expanded help: %s", joined)
 	}
 }
@@ -590,6 +641,7 @@ func TestViewportScrollAndClick(t *testing.T) {
 func TestPullsMouse(t *testing.T) {
 	m, _ := newTestPulls(t)
 	run(m, tea.WindowSizeMsg{Width: 160, Height: 30})
+	run(m, key("m")) // hide the comment text, so every pull is four rows
 	// the second visible pull starts at body row 4: rows 0-3 are the first
 	run(m, click(bodyTop+4))
 	if m.cursor != 1 {

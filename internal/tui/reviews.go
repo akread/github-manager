@@ -391,7 +391,8 @@ func (m *reviewsModel) frame() frame {
 		errMsg:       m.errMsg,
 		status:       m.statusMsg,
 		helpExpanded: m.helpOn,
-		help:         "j/k move · c commit · C commit all · s subscribe pull · o open · r refresh · a toggle all",
+		help:         "c commit · s subscribe pull · o open · r refresh · a toggle all",
+		moreHelp:     "j/k move · C commit all",
 	}
 }
 

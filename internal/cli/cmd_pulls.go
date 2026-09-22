@@ -118,9 +118,9 @@ var pullsListCmd = &cobra.Command{
 }
 
 var (
-	pullsWatchExpanded bool
-	pullsWatchComments bool
-	pullsWatchMine     bool
+	pullsWatchExpanded   bool
+	pullsWatchNoComments bool
+	pullsWatchMine       bool
 )
 
 var pullsWatchCmd = &cobra.Command{
@@ -130,11 +130,12 @@ var pullsWatchCmd = &cobra.Command{
 
 Keys: j/k move, c commit the selected pull request, C commit all, s subscribe
 a url, u unsubscribe, o open in the browser, r refresh, a show all or only
-updates, y show only your own pull requests or every author, m show or hide
+updates, A show only your own pull requests or every author, m show or hide
 comment text, ? expand or collapse the help, q quit.
 
 The help is one row; items that do not fit are cut, and "? help" appears at
-the right edge. Press ? to wrap every item onto more rows.`,
+the right edge. The j/k, C, and u items show only in the expanded help. Press ?
+to wrap every item onto more rows.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, interval, err := loadConfig()
@@ -147,19 +148,19 @@ the right edge. Press ? to wrap every item onto more rows.`,
 		}
 		defer st.Close()
 		return tui.RunPulls(tui.PullsOptions{
-			Store:    st,
-			Load:     tui.PullLoader(github.NewClient(), cfg.Excluded),
-			Interval: interval,
-			Expanded: pullsWatchExpanded,
-			Comments: pullsWatchComments,
-			Mine:     pullsWatchMine,
+			Store:      st,
+			Load:       tui.PullLoader(github.NewClient(), cfg.Excluded),
+			Interval:   interval,
+			Expanded:   pullsWatchExpanded,
+			NoComments: pullsWatchNoComments,
+			Mine:       pullsWatchMine,
 		})
 	},
 }
 
 func init() {
 	pullsWatchCmd.Flags().BoolVar(&pullsWatchExpanded, "expanded", false, "start with every pull request shown, not only those with updates")
-	pullsWatchCmd.Flags().BoolVar(&pullsWatchComments, "comments", false, "start with the text of new comments shown")
+	pullsWatchCmd.Flags().BoolVar(&pullsWatchNoComments, "no-comments", false, "start with the text of new comments hidden")
 	pullsWatchCmd.Flags().BoolVar(&pullsWatchMine, "mine", false, "start with only your own pull requests shown")
 	pullsCmd.AddCommand(pullsSubscribeCmd, pullsUnsubscribeCmd, pullsListCmd, pullsWatchCmd)
 }

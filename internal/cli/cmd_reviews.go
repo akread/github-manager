@@ -132,7 +132,8 @@ subscribe the selected pull request under pulls, o open in the browser, r
 refresh, a show all or only new, ? expand or collapse the help, q quit.
 
 The help is one row; items that do not fit are cut, and "? help" appears at
-the right edge. Press ? to wrap every item onto more rows.`,
+the right edge. The j/k and C items show only in the expanded help. Press ?
+to wrap every item onto more rows.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		_, interval, err := loadConfig()

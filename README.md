@@ -33,7 +33,7 @@ source <(ghw completion zsh)
 ghw pulls subscribe https://github.com/owner/name/pull/123
 ghw pulls unsubscribe https://github.com/owner/name/pull/123
 ghw pulls list
-ghw pulls watch [--expanded] [--comments] [--mine]
+ghw pulls watch [--expanded] [--no-comments] [--mine]
 
 ghw reviews subscribe owner/name             # github.com
 ghw reviews subscribe https://ghe.example.com/owner/name
@@ -46,7 +46,7 @@ ghw reviews watch [--expanded]
 
 Each subscription has a commit point. The watch shows activity after that point as new: comments, review comments, approvals, and requested changes. A pull request also counts as an update when it is closed, or when a review request for you arrives after that point. After a commit the `Review requested` row stays in the dim style until you submit the review.
 
-By default the watch shows only pull requests with updates. Comments from you, from non-user accounts, and from the excluded usernames of the domain are ignored. Your own pull requests show your username underlined. Press `y` to show only those.
+By default the watch shows only pull requests with updates. Comments from you, from non-user accounts, and from the excluded usernames of the domain are ignored. Your own pull requests show your username underlined. Press `A` to show only those.
 
 | Key | Action |
 | --- | --- |
@@ -59,8 +59,8 @@ By default the watch shows only pull requests with updates. Comments from you, f
 | `r` | refresh now |
 | `/` | filter the list by title, repo, number, author, or url |
 | `a` | show every pull request, or only those with updates |
-| `y` | show only your own pull requests, or those from every author |
-| `m` | show or hide the text of new comments |
+| `A` | show only your own pull requests, or those from every author |
+| `m` | show or hide the text of new comments; the text shows by default, and the header reads `comments hidden` when it is off |
 | `?` | expand or collapse the help |
 | `q` | quit |
 
@@ -70,7 +70,7 @@ The commit is per pull request. The JavaScript tool committed every pull request
 
 Both watch screens take mouse input: the wheel scrolls the list, and a left click moves the cursor to the row under the pointer.
 
-The help is one row with `q quit` at the right edge. When the shortcuts do not fit, the row cuts them with an ellipsis and the right edge reads `? help · q quit`. Press `?` to wrap every shortcut onto more rows, and again to collapse it. The right-edge keys stay on the bottom row in both states.
+The help is one row. The `j` / `k` and `C` shortcuts are hidden from it, and `u` in the pulls watch, so the right edge reads `? help · q quit`. When the other shortcuts do not fit, the row cuts them with an ellipsis. Press `?` to show every shortcut, wrapped onto as many rows as it needs, and again to collapse it. The right-edge keys stay on the bottom row in both states.
 
 ### reviews watch
 

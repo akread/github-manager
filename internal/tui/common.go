@@ -202,6 +202,7 @@ type frame struct {
 	errMsg        string
 	status        string
 	help          string // the help items, without the tail
+	moreHelp      string // the help items that show only when the help is expanded
 	helpExpanded  bool   // the user pressed ? to show every item on more rows
 	noTail        bool   // leave out the "? help · q quit" tail
 }
@@ -232,18 +233,20 @@ func wrapHelp(help string, width int) []string {
 	return append(rows, cur)
 }
 
-// quitTail is the end of the help row when every item fits. helpTail
-// replaces it when the items are cut, or when the help is expanded, so the
-// user sees the key that toggles the help only when it does something.
+// quitTail is the end of the help row when every item fits and no item is
+// hidden. helpTail replaces it when the items are cut, when some items show
+// only in the expanded help, or when the help is expanded, so the user sees
+// the key that toggles the help only when it does something.
 const (
 	quitTail = "q quit"
 	helpTail = "? help · q quit"
 )
 
 // helpRows returns the help rows. The tail sits at the right edge of the
-// last row. By default the items take one row and are cut with an ellipsis
-// when they do not fit. When expanded, the items wrap onto as many rows as
-// they need, in the space left of the tail.
+// last row. By default the items in help take one row and are cut with an
+// ellipsis when they do not fit; the items in moreHelp stay hidden. When
+// expanded, every item wraps onto as many rows as it needs, in the space
+// left of the tail.
 func (f frame) helpRows() []string {
 	if f.noTail {
 		if f.width <= 0 {
@@ -251,21 +254,28 @@ func (f frame) helpRows() []string {
 		}
 		return []string{ansi.Truncate(f.help, f.width, "…")}
 	}
-	if f.width <= 0 {
-		return []string{f.help + "  " + quitTail}
+	tail := quitTail
+	if f.moreHelp != "" {
+		tail = helpTail
 	}
-	fits := ansi.StringWidth(f.help) <= f.width-ansi.StringWidth(quitTail)-2
-	tail := helpTail
-	if fits {
-		tail = quitTail
+	if f.width <= 0 {
+		return []string{f.help + "  " + tail}
+	}
+	fits := ansi.StringWidth(f.help) <= f.width-ansi.StringWidth(tail)-2
+	if !fits {
+		tail = helpTail
 	}
 	avail := max(f.width-ansi.StringWidth(tail)-2, 1)
 	var rows []string
 	switch {
+	case f.helpExpanded:
+		full := f.help
+		if f.moreHelp != "" {
+			full += helpSep + f.moreHelp
+		}
+		rows = wrapHelp(full, avail)
 	case fits:
 		rows = []string{f.help}
-	case f.helpExpanded:
-		rows = wrapHelp(f.help, avail)
 	default:
 		rows = []string{ansi.Truncate(f.help, avail, "…")}
 	}
