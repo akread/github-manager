@@ -41,8 +41,12 @@ func TestDerivePull(t *testing.T) {
 			{Event: "reviewed", User: rawUser{Login: "gina"}, State: "commented", SubmittedAt: ts(11)},
 			{Event: "labeled", CreatedAt: *ts(11)}, // an unknown kind is skipped
 		},
-		checks: []rawCheck{{State: "SUCCESS"}, {State: "PENDING"}},
+		rules: []string{"lint", "unit"},
 	}
+	d.graph.Commits.Nodes = append(d.graph.Commits.Nodes, rollup(
+		rawContext{Type: "StatusContext", Context: "lint", State: "SUCCESS"},
+		rawContext{Type: "CheckRun", Name: "unit", Status: "IN_PROGRESS"},
+	))
 	s := derivePull(PullRef{Number: 1}, d, since, fetched, []string{"svc-user"})
 
 	if len(s.Comments) != 1 || s.Comments[0].Author != "bob" {
@@ -149,25 +153,67 @@ func TestDerivePullQuiet(t *testing.T) {
 	}
 }
 
+// rollup builds one commit node whose rollup holds the given contexts.
+func rollup(contexts ...rawContext) (n struct {
+	Commit struct {
+		Rollup *struct {
+			Contexts struct {
+				Nodes []rawContext `json:"nodes"`
+			} `json:"contexts"`
+		} `json:"statusCheckRollup"`
+	} `json:"commit"`
+}) {
+	n.Commit.Rollup = new(struct {
+		Contexts struct {
+			Nodes []rawContext `json:"nodes"`
+		} `json:"contexts"`
+	})
+	n.Commit.Rollup.Contexts.Nodes = contexts
+	return n
+}
+
 func TestReduceChecks(t *testing.T) {
+	status := func(name, state string, required bool) rawContext {
+		return rawContext{Type: "StatusContext", Context: name, State: state, Required: required}
+	}
+	run := func(name, status, conclusion string, started int) rawContext {
+		return rawContext{Type: "CheckRun", Name: name, Status: status, Conclusion: conclusion, StartedAt: *ts(started)}
+	}
 	cases := []struct {
-		in   []string
-		want string
+		name     string
+		rules    []string
+		legacy   []string
+		contexts []rawContext
+		want     string
 	}{
-		{nil, CheckNone},
-		{[]string{"SUCCESS", "SKIPPED"}, CheckSuccess},
-		{[]string{"SUCCESS", "PENDING"}, CheckPending},
-		{[]string{"PENDING", "FAILURE"}, CheckFailure},
-		{[]string{"FAILURE", "PENDING"}, CheckFailure},
-		{[]string{"IN_PROGRESS"}, CheckPending},
+		{name: "nothing", want: CheckNone},
+		{name: "no rules and no required flag", contexts: []rawContext{status("lint", "PENDING", false)}, want: CheckNone},
+		{name: "all pass", rules: []string{"lint"}, contexts: []rawContext{status("lint", "SUCCESS", true), status("extra", "FAILURE", false)}, want: CheckSuccess},
+		{name: "skipped counts as pass", rules: []string{"lint"}, contexts: []rawContext{run("lint", "COMPLETED", "SKIPPED", 1)}, want: CheckSuccess},
+		{name: "one pending", rules: []string{"lint", "unit"}, contexts: []rawContext{status("lint", "SUCCESS", true), status("unit", "PENDING", true)}, want: CheckPending},
+		{name: "check run in progress", rules: []string{"unit"}, contexts: []rawContext{run("unit", "IN_PROGRESS", "", 1)}, want: CheckPending},
+		{name: "failure wins", rules: []string{"lint", "unit"}, contexts: []rawContext{status("lint", "PENDING", true), run("unit", "COMPLETED", "FAILURE", 1)}, want: CheckFailure},
+		{name: "required flag without rules", contexts: []rawContext{status("lint", "SUCCESS", true)}, want: CheckSuccess},
+		{name: "legacy protection", legacy: []string{"lint"}, contexts: []rawContext{status("lint", "FAILURE", false)}, want: CheckFailure},
+		// the required context never reported, so the rollup has no entry
+		{name: "expected context is pending", rules: []string{"lint", "merge"}, contexts: []rawContext{status("lint", "SUCCESS", true)}, want: CheckPending},
+		{name: "expected context with empty rollup", rules: []string{"lint"}, want: CheckPending},
+		// a check run that ran again: the latest run gives the state
+		{name: "latest run wins", rules: []string{"unit"}, contexts: []rawContext{run("unit", "COMPLETED", "FAILURE", 1), run("unit", "COMPLETED", "SUCCESS", 2)}, want: CheckSuccess},
+		{name: "latest run wins in any order", rules: []string{"unit"}, contexts: []rawContext{run("unit", "COMPLETED", "FAILURE", 2), run("unit", "COMPLETED", "SUCCESS", 1)}, want: CheckFailure},
 	}
 	for _, c := range cases {
-		var checks []rawCheck
-		for _, s := range c.in {
-			checks = append(checks, rawCheck{State: s})
+		var g rawGraph
+		if c.legacy != nil {
+			g.BaseRef.Protection = &struct {
+				Contexts []string `json:"requiredStatusCheckContexts"`
+			}{Contexts: c.legacy}
 		}
-		if got := reduceChecks(checks); got != c.want {
-			t.Errorf("%v: got %q, want %q", c.in, got, c.want)
+		if c.contexts != nil {
+			g.Commits.Nodes = append(g.Commits.Nodes, rollup(c.contexts...))
+		}
+		if got := reduceChecks(c.rules, g); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
 		}
 	}
 }
@@ -191,43 +237,106 @@ func TestMergePull(t *testing.T) {
 	}
 }
 
-func TestMergeQueue(t *testing.T) {
+func TestPullGraph(t *testing.T) {
+	var got [][]string
+	out := `{"data":{"repository":{"pullRequest":{
+		"isInMergeQueue":true,"isMergeQueueEnabled":true,"mergeQueueEntry":{"state":"AWAITING_CHECKS","position":3},
+		"baseRefName":"main","baseRef":{"branchProtectionRule":{"requiredStatusCheckContexts":["legacy"]}},
+		"commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"nodes":[
+			{"__typename":"StatusContext","context":"lint","state":"SUCCESS","createdAt":"2026-09-03T10:00:00Z","isRequired":true},
+			{"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-09-03T11:00:00Z","isRequired":false}
+		]}}}}]}}}}}`
+	c := &Client{run: func(args ...string) ([]byte, []byte, error) {
+		got = append(got, args)
+		return []byte(out), nil, nil
+	}, users: map[string]string{}}
+	ref := PullRef{Domain: "github.com", Repo: "o/r", Number: 12}
+	g, err := c.pullGraph(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.InQueue || !g.QueueEnabled || g.Entry == nil || g.Entry.State != "AWAITING_CHECKS" || g.Entry.Position != 3 {
+		t.Fatalf("queue: %+v", g.rawQueue)
+	}
+	if g.BaseRefName != "main" || g.BaseRef.Protection == nil || len(g.BaseRef.Protection.Contexts) != 1 {
+		t.Fatalf("base: %+v", g.BaseRef)
+	}
+	nodes := g.Commits.Nodes[0].Commit.Rollup.Contexts.Nodes
+	if len(nodes) != 2 || nodes[0].name() != "lint" || !nodes[0].Required || nodes[1].name() != "unit" || nodes[1].state() != "FAILURE" {
+		t.Fatalf("contexts: %+v", nodes)
+	}
+	want := []string{"api", "graphql", "--hostname", "github.com", "-f"}
+	if len(got) != 1 || len(got[0]) != 6 || strings.Join(got[0][:5], " ") != strings.Join(want, " ") {
+		t.Fatalf("args: %v", got)
+	}
+	q := got[0][5]
+	for _, part := range []string{`repository(owner:"o", name:"r")`, "pullRequest(number:12)", "isInMergeQueue", "isRequired(pullRequestNumber:12)", "requiredStatusCheckContexts"} {
+		if !strings.Contains(q, part) {
+			t.Fatalf("query lacks %q: %s", part, q)
+		}
+	}
+
+	// a host without merge queue fields is queried again without them
+	got = nil
+	c.run = func(args ...string) ([]byte, []byte, error) {
+		got = append(got, args)
+		if strings.Contains(args[5], "isInMergeQueue") {
+			return nil, []byte(`Field 'isInMergeQueue' doesn't exist on type 'PullRequest'`), errors.New("gh api graphql: exit status 1")
+		}
+		return []byte(`{"data":{"repository":{"pullRequest":{"baseRefName":"main"}}}}`), nil, nil
+	}
+	g, err = c.pullGraph(ref)
+	if err != nil || g.InQueue || g.BaseRefName != "main" || len(got) != 2 {
+		t.Fatalf("missing schema: g=%+v err=%v calls=%d", g, err, len(got))
+	}
+	c.run = func(args ...string) ([]byte, []byte, error) { return nil, nil, errors.New("network down") }
+	if _, err := c.pullGraph(ref); err == nil {
+		t.Fatal("other errors must surface")
+	}
+
+	var d pullData
+	d.pull.State = "open"
+	d.graph.Entry = &rawQueueEntry{State: "AWAITING_CHECKS", Position: 3}
+	d.graph.InQueue = true
+	s := derivePull(ref, d, time.Time{}, time.Time{}, nil)
+	if !s.InMergeQueue || s.QueueState != "AWAITING_CHECKS" || s.QueuePosition != 3 {
+		t.Fatalf("status: %+v", s)
+	}
+}
+
+func TestBranchRules(t *testing.T) {
 	var got []string
-	out := `{"data":{"repository":{"pullRequest":{"isInMergeQueue":true,"isMergeQueueEnabled":true,"mergeQueueEntry":{"state":"AWAITING_CHECKS","position":3}}}}}`
+	out := `[
+		{"type":"deletion"},
+		{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"lint"},{"context":"unit"}]}},
+		{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"e2e"}]}}
+	]`
 	c := &Client{run: func(args ...string) ([]byte, []byte, error) {
 		got = args
 		return []byte(out), nil, nil
 	}, users: map[string]string{}}
 	ref := PullRef{Domain: "github.com", Repo: "o/r", Number: 12}
-	q, err := c.mergeQueue(ref)
+	rules, err := c.branchRules(ref, "release/1.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !q.InQueue || !q.QueueEnabled || q.Entry == nil || q.Entry.State != "AWAITING_CHECKS" || q.Entry.Position != 3 {
-		t.Fatalf("queue: %+v", q)
+	if strings.Join(rules, ",") != "lint,unit,e2e" {
+		t.Fatalf("rules: %v", rules)
 	}
-	want := []string{"api", "graphql", "--hostname", "github.com", "-f"}
-	if len(got) != 6 || strings.Join(got[:5], " ") != strings.Join(want, " ") {
-		t.Fatalf("args: %v", got)
-	}
-	if !strings.Contains(got[5], `repository(owner:"o", name:"r")`) || !strings.Contains(got[5], "pullRequest(number:12)") {
-		t.Fatalf("query: %s", got[5])
+	want := "api --hostname github.com repos/o/r/rules/branches/release%2F1.0"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("args: %v, want %q", got, want)
 	}
 
-	// a host without merge queue fields gives an empty result
+	// a host without rulesets gives an empty list
 	c.run = func(args ...string) ([]byte, []byte, error) {
-		return nil, []byte(`Field 'isInMergeQueue' doesn't exist on type 'PullRequest'`), errors.New("gh api graphql: exit status 1")
+		return nil, nil, errors.New("gh api: HTTP 404: Not Found (https://api.github.com/repos/o/r/rules/branches/main)")
 	}
-	if q, err := c.mergeQueue(ref); err != nil || q.InQueue {
-		t.Fatalf("missing schema: q=%+v err=%v", q, err)
+	if rules, err := c.branchRules(ref, "main"); err != nil || rules != nil {
+		t.Fatalf("404: rules=%v err=%v", rules, err)
 	}
 	c.run = func(args ...string) ([]byte, []byte, error) { return nil, nil, errors.New("network down") }
-	if _, err := c.mergeQueue(ref); err == nil {
+	if _, err := c.branchRules(ref, "main"); err == nil {
 		t.Fatal("other errors must surface")
-	}
-
-	s := derivePull(ref, pullData{pull: rawPull{State: "open"}, queue: q}, time.Time{}, time.Time{}, nil)
-	if !s.InMergeQueue || s.QueueState != "AWAITING_CHECKS" || s.QueuePosition != 3 {
-		t.Fatalf("status: %+v", s)
 	}
 }

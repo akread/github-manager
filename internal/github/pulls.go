@@ -48,12 +48,30 @@ type rawReview struct {
 	SubmittedAt *time.Time
 }
 
-type rawCheck struct {
-	State string `json:"state"`
+// rawGraph is the GraphQL view of a pull request. The REST API does not
+// report the merge queue or which checks are required.
+type rawGraph struct {
+	rawQueue
+	BaseRefName string `json:"baseRefName"`
+	BaseRef     struct {
+		Protection *struct {
+			Contexts []string `json:"requiredStatusCheckContexts"`
+		} `json:"branchProtectionRule"` // legacy branch protection; nil when the branch has none
+	} `json:"baseRef"`
+	Commits struct {
+		Nodes []struct {
+			Commit struct {
+				Rollup *struct {
+					Contexts struct {
+						Nodes []rawContext `json:"nodes"`
+					} `json:"contexts"`
+				} `json:"statusCheckRollup"` // nil when nothing reported on the commit
+			} `json:"commit"`
+		} `json:"nodes"`
+	} `json:"commits"`
 }
 
-// rawQueue is the merge queue view of a pull request, from GraphQL. The
-// REST API does not report it.
+// rawQueue is the merge queue view of a pull request.
 type rawQueue struct {
 	InQueue      bool           `json:"isInMergeQueue"`
 	QueueEnabled bool           `json:"isMergeQueueEnabled"` // the base branch has a merge queue
@@ -65,14 +83,56 @@ type rawQueueEntry struct {
 	Position int    `json:"position"`
 }
 
+// rawContext is one entry of the status check rollup: a commit status or a
+// check run. A commit status has Context and State. A check run has Name,
+// Status, and Conclusion.
+type rawContext struct {
+	Type       string    `json:"__typename"` // StatusContext or CheckRun
+	Context    string    `json:"context"`
+	State      string    `json:"state"`
+	CreatedAt  time.Time `json:"createdAt"`
+	Name       string    `json:"name"`
+	Status     string    `json:"status"`     // QUEUED, IN_PROGRESS, COMPLETED, WAITING, PENDING, REQUESTED
+	Conclusion string    `json:"conclusion"` // set when Status is COMPLETED
+	StartedAt  time.Time `json:"startedAt"`
+	Required   bool      `json:"isRequired"`
+}
+
+// name returns the context name that branch rules refer to.
+func (c rawContext) name() string {
+	if c.Context != "" {
+		return c.Context
+	}
+	return c.Name
+}
+
+// time returns when the context was made, to pick the latest of a name.
+func (c rawContext) time() time.Time {
+	if c.StartedAt.After(c.CreatedAt) {
+		return c.StartedAt
+	}
+	return c.CreatedAt
+}
+
+// state returns the state of the context as one uppercase word.
+func (c rawContext) state() string {
+	if c.State != "" {
+		return strings.ToUpper(c.State)
+	}
+	if c.Status != "COMPLETED" {
+		return CheckPending
+	}
+	return strings.ToUpper(c.Conclusion)
+}
+
 // pullData is everything fetched for one pull request.
 type pullData struct {
 	pull           rawPull
 	comments       []rawComment
 	reviewComments []rawComment
 	timeline       []rawEvent
-	checks         []rawCheck
-	queue          rawQueue
+	graph          rawGraph
+	rules          []string // required contexts from the rulesets of the base branch
 	username       string
 }
 
@@ -208,13 +268,13 @@ func (c *Client) LoadPull(ref PullRef, since time.Time, excluded []string) (*Pul
 			return err
 		},
 		func() error {
-			checks, err := c.requiredChecks(ref)
-			d.checks = checks
-			return err
-		},
-		func() error {
-			q, err := c.mergeQueue(ref)
-			d.queue = q
+			g, err := c.pullGraph(ref)
+			if err != nil {
+				return err
+			}
+			d.graph = g
+			// the rules need the base branch, so they follow the graph
+			d.rules, err = c.branchRules(ref, g.BaseRefName)
 			return err
 		},
 		func() error {
@@ -283,13 +343,13 @@ func derivePull(ref PullRef, d pullData, since, fetchedAt time.Time, excluded []
 		Draft:          d.pull.Draft,
 		Comments:       toComments(d.comments),
 		ReviewComments: toComments(d.reviewComments),
-		CheckState:     reduceChecks(d.checks),
-		InMergeQueue:   d.queue.InQueue,
-		QueueEnabled:   d.queue.QueueEnabled,
+		CheckState:     reduceChecks(d.rules, d.graph),
+		InMergeQueue:   d.graph.InQueue,
+		QueueEnabled:   d.graph.QueueEnabled,
 	}
-	if d.queue.Entry != nil {
-		s.QueueState = d.queue.Entry.State
-		s.QueuePosition = d.queue.Entry.Position
+	if d.graph.Entry != nil {
+		s.QueueState = d.graph.Entry.State
+		s.QueuePosition = d.graph.Entry.Position
 	}
 	// the events are oldest first, so the last request, removal, or review
 	// by the user gives the current state, and the time of the request says
@@ -355,15 +415,46 @@ func submitted(r rawReview) time.Time {
 	return *r.SubmittedAt
 }
 
-// reduceChecks folds the required check states into one: a failure wins
-// over a pending check, and a pending check wins over success.
-func reduceChecks(checks []rawCheck) string {
-	if len(checks) == 0 {
+// reduceChecks folds the states of the required checks into one: a failure
+// wins over a pending check, and a pending check wins over success. The
+// required contexts come from the rulesets, from legacy branch protection,
+// and from the required flag of the rollup. A required context that has no
+// entry in the rollup did not report yet, so it counts as pending. GitHub
+// shows it as expected, but the rollup leaves it out.
+func reduceChecks(rules []string, g rawGraph) string {
+	required := map[string]bool{}
+	for _, name := range rules {
+		required[name] = true
+	}
+	if g.BaseRef.Protection != nil {
+		for _, name := range g.BaseRef.Protection.Contexts {
+			required[name] = true
+		}
+	}
+	// a name can have several entries, such as a check run that ran again;
+	// the latest one gives the state
+	latest := map[string]rawContext{}
+	if len(g.Commits.Nodes) > 0 && g.Commits.Nodes[0].Commit.Rollup != nil {
+		for _, c := range g.Commits.Nodes[0].Commit.Rollup.Contexts.Nodes {
+			if c.Required {
+				required[c.name()] = true
+			}
+			if prev, ok := latest[c.name()]; !ok || !c.time().Before(prev.time()) {
+				latest[c.name()] = c
+			}
+		}
+	}
+	if len(required) == 0 {
 		return CheckNone
 	}
 	state := CheckSuccess
-	for _, c := range checks {
-		switch strings.ToUpper(c.State) {
+	for name := range required {
+		c, ok := latest[name]
+		if !ok {
+			state = CheckPending
+			continue
+		}
+		switch c.state() {
 		case "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE":
 			return CheckFailure
 		case "PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "EXPECTED":

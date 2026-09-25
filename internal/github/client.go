@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
@@ -90,53 +91,75 @@ func (c *Client) MergePull(ref PullRef, method string) error {
 	return err
 }
 
-// mergeQueue fetches the merge queue state of a pull request with GraphQL.
-// A host whose schema has no merge queue fields, such as an older GitHub
-// Enterprise Server, gives an empty result and no error.
-func (c *Client) mergeQueue(ref PullRef) (rawQueue, error) {
+// pullGraph fetches the GraphQL view of a pull request: the merge queue
+// state, the base branch, the legacy branch protection contexts, and the
+// check rollup of the head commit. A host whose schema has no merge queue
+// fields, such as an older GitHub Enterprise Server, is queried again
+// without them.
+func (c *Client) pullGraph(ref PullRef) (rawGraph, error) {
 	owner, name, ok := strings.Cut(ref.Repo, "/")
 	if !ok {
-		return rawQueue{}, fmt.Errorf("merge queue: invalid repo %q", ref.Repo)
+		return rawGraph{}, fmt.Errorf("pull graph: invalid repo %q", ref.Repo)
 	}
-	query := fmt.Sprintf(`{ repository(owner:%q, name:%q) { pullRequest(number:%d) { isInMergeQueue isMergeQueueEnabled mergeQueueEntry { state position } } } }`, owner, name, ref.Number)
-	stdout, stderr, err := c.run("api", "graphql", "--hostname", ref.Domain, "-f", "query="+query)
-	if err != nil {
-		if strings.Contains(string(stderr)+err.Error(), "doesn't exist on type") {
-			return rawQueue{}, nil
+	const queueFields = "isInMergeQueue isMergeQueueEnabled mergeQueueEntry { state position } "
+	build := func(queue bool) string {
+		fields := "baseRefName baseRef { branchProtectionRule { requiredStatusCheckContexts } } " +
+			"commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100) { nodes { __typename " +
+			fmt.Sprintf("... on StatusContext { context state createdAt isRequired(pullRequestNumber:%d) } ", ref.Number) +
+			fmt.Sprintf("... on CheckRun { name status conclusion startedAt isRequired(pullRequestNumber:%d) } ", ref.Number) +
+			"} } } } } }"
+		if queue {
+			fields = queueFields + fields
 		}
-		return rawQueue{}, err
+		return fmt.Sprintf(`{ repository(owner:%q, name:%q) { pullRequest(number:%d) { %s } } }`, owner, name, ref.Number, fields)
+	}
+	stdout, stderr, err := c.run("api", "graphql", "--hostname", ref.Domain, "-f", "query="+build(true))
+	if err != nil && strings.Contains(string(stderr)+err.Error(), "doesn't exist on type") {
+		stdout, _, err = c.run("api", "graphql", "--hostname", ref.Domain, "-f", "query="+build(false))
+	}
+	if err != nil {
+		return rawGraph{}, err
 	}
 	var resp struct {
 		Data struct {
 			Repository struct {
-				PullRequest rawQueue `json:"pullRequest"`
+				PullRequest rawGraph `json:"pullRequest"`
 			} `json:"repository"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return rawQueue{}, fmt.Errorf("decode merge queue: %w", err)
+		return rawGraph{}, fmt.Errorf("decode pull graph: %w", err)
 	}
 	return resp.Data.Repository.PullRequest, nil
 }
 
-// requiredChecks lists the states of the required checks on a pull request.
-// A pull request with no required checks gives an empty list.
-func (c *Client) requiredChecks(ref PullRef) ([]rawCheck, error) {
-	stdout, stderr, err := c.run("pr", "checks", fmt.Sprint(ref.Number), "--repo", ref.Domain+"/"+ref.Repo, "--required", "--json", "state")
-	if err != nil {
-		msg := string(stderr) + err.Error()
-		if strings.Contains(msg, "no checks reported") || strings.Contains(msg, "no required checks reported") {
+// branchRules lists the status check contexts that the rulesets of a
+// repository need on a branch. Legacy branch protection is not part of the
+// answer; pullGraph reports it. A host without rulesets gives an empty list.
+func (c *Client) branchRules(ref PullRef, branch string) ([]string, error) {
+	var rules []struct {
+		Type       string `json:"type"`
+		Parameters struct {
+			Checks []struct {
+				Context string `json:"context"`
+			} `json:"required_status_checks"`
+		} `json:"parameters"`
+	}
+	path := fmt.Sprintf("repos/%s/rules/branches/%s", ref.Repo, url.PathEscape(branch))
+	if err := c.api(ref.Domain, path, &rules); err != nil {
+		if strings.Contains(err.Error(), "HTTP 404") {
 			return nil, nil
 		}
-		// gh exits 8 when checks are pending and 1 when checks fail; the
-		// json output is still complete in both cases.
-		if len(bytes.TrimSpace(stdout)) == 0 {
-			return nil, err
+		return nil, err
+	}
+	var out []string
+	for _, r := range rules {
+		if r.Type != "required_status_checks" {
+			continue
+		}
+		for _, ch := range r.Parameters.Checks {
+			out = append(out, ch.Context)
 		}
 	}
-	var checks []rawCheck
-	if err := json.Unmarshal(stdout, &checks); err != nil {
-		return nil, fmt.Errorf("decode pr checks: %w", err)
-	}
-	return checks, nil
+	return out, nil
 }
