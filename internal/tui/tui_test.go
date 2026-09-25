@@ -594,7 +594,7 @@ func newTestCategorized(t *testing.T) (*reviewsModel, *store.Store, *fakeCategor
 func TestReviewsCategorize(t *testing.T) {
 	m, st, f := newTestCategorized(t)
 	v := plain(m.View())
-	for _, want := range []string{"[HIGH security] o/a PR 1", "[docs] o/a PR 2", "hook boom", "1 high"} {
+	for _, want := range []string{"[▮▮▮ security] o/a PR 1", "[▮▮▯ docs] o/a PR 2", "hook boom", "1 high"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("missing %q: %s", want, v)
 		}

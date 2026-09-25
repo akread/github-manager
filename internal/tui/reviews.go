@@ -689,10 +689,11 @@ func wrapIndent(text string, indent, width int) []string {
 	return strings.Split(ansi.Wrap(text, limit, ""), "\n")
 }
 
-// categoryTag draws the hook result of a request: the priority in upper
-// case with the category label, such as [HIGH security]. A normal priority
-// shows only the label, and nothing when there is none. A run in progress
-// shows [categorizing…].
+// categoryTag draws the hook result of a request: a three-bar meter for the
+// priority with the category label, such as [▮▮▮ security]. A high priority
+// fills three bars in red, a normal one two bars in cyan, and a low one one
+// bar in the dim style. There is nothing when there is no result. A run in
+// progress shows [categorizing…].
 func categoryTag(r ReviewRequest) string {
 	if r.Categorizing {
 		return dimItalic.Render("[categorizing…]")
@@ -703,14 +704,11 @@ func categoryTag(r ReviewRequest) string {
 	c := r.Category
 	switch c.Priority {
 	case "high":
-		return redStyle.Bold(true).Render("[" + join("HIGH", c.Category) + "]")
+		return redStyle.Bold(true).Render("[" + join("▮▮▮", c.Category) + "]")
 	case "low":
-		return dimItalic.Render("[" + join("LOW", c.Category) + "]")
+		return dimItalic.Render("[" + join("▮▯▯", c.Category) + "]")
 	}
-	if c.Category == "" {
-		return ""
-	}
-	return cyanStyle.Render("[" + c.Category + "]")
+	return cyanStyle.Render("[" + join("▮▮▯", c.Category) + "]")
 }
 
 // join puts a space between two words and leaves out an empty one.

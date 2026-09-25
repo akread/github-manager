@@ -136,7 +136,7 @@ The command must exit 0 and print one JSON object on stdout. Text before the obj
 | `category` | optional short label; the list cuts it at 24 characters |
 | `summary` | optional one line; line breaks become spaces |
 
-A high priority shows `[HIGH category]` in red before the title, a low one shows `[LOW category]` in the dim style, and a normal one shows only `[category]`. Press `m` to show the summary under the url; it wraps onto more rows when it is wider than the screen. The header counts the high priority requests, and `p` limits the list to them.
+The priority shows as a three-bar meter before the title: a high priority shows `[▮▮▮ category]` in red, a normal one shows `[▮▮▯ category]` in cyan, and a low one shows `[▮▯▯ category]` in the dim style. Press `m` to show the summary under the url; it wraps onto more rows when it is wider than the screen. The header counts the high priority requests, and `p` limits the list to them.
 
 A one-line hook that flags every draft as low and the rest as normal:
 
