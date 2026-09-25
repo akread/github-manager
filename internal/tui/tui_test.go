@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github-manager/internal/github"
+	"github-manager/internal/hook"
 	"github-manager/internal/store"
 )
 
@@ -533,6 +535,183 @@ func newTestReviews(t *testing.T) (*reviewsModel, *store.Store) {
 	run(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	run(m, m.refresh()())
 	return m, st
+}
+
+// fakeCategorize gives PR 1 a high priority, PR 2 a normal one, and fails
+// for o/b PR 1. It counts the runs per url.
+type fakeCategorize struct {
+	mu   sync.Mutex
+	runs map[string]int
+}
+
+func (f *fakeCategorize) run(in hook.Input) (hook.Result, error) {
+	f.mu.Lock()
+	f.runs[in.URL]++
+	f.mu.Unlock()
+	if in.Repo == "o/b" && in.Number == 1 {
+		return hook.Result{}, errors.New("hook boom")
+	}
+	if in.Number == 1 {
+		return hook.Result{Priority: "high", Category: "security", Summary: "touches " + in.Title}, nil
+	}
+	return hook.Result{Priority: "normal", Category: "docs"}, nil
+}
+
+// drain runs a command and feeds every message it produces back into the
+// model, batches included, so the parallel hook runs all land.
+func drain(m tea.Model, cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	out := cmd()
+	switch msg := out.(type) {
+	case nil, tickMsg:
+	case tea.BatchMsg:
+		for _, c := range msg {
+			drain(m, c)
+		}
+	default:
+		_, next := m.Update(msg)
+		drain(m, next)
+	}
+}
+
+func newTestCategorized(t *testing.T) (*reviewsModel, *store.Store, *fakeCategorize) {
+	t.Helper()
+	st := testStore(t)
+	for _, r := range []string{"o/a", "o/b"} {
+		if _, err := st.SubscribeRepo(store.Repo{Domain: "github.com", Repo: r}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := &fakeCategorize{runs: map[string]int{}}
+	m := newReviewsModel(ReviewsOptions{Store: st, Load: fakeReviewLoader, Interval: time.Hour, Open: func(string) error { return nil }, Categorize: f.run})
+	run(m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	drain(m, m.refresh())
+	return m, st, f
+}
+
+func TestReviewsCategorize(t *testing.T) {
+	m, st, f := newTestCategorized(t)
+	v := plain(m.View())
+	for _, want := range []string{"[HIGH security] o/a PR 1", "[docs] o/a PR 2", "hook boom", "1 high"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("missing %q: %s", want, v)
+		}
+	}
+	if strings.Contains(v, "categorizing") || strings.Contains(v, "hook running") {
+		t.Fatalf("runs must be done: %s", v)
+	}
+	// summaries start hidden; m shows them
+	if strings.Contains(v, "touches o/a PR 1") || strings.Contains(v, "summaries shown") {
+		t.Fatalf("summary must start hidden: %s", v)
+	}
+	run(m, key("m"))
+	v = plain(m.View())
+	if !strings.Contains(v, "touches o/a PR 1") || !strings.Contains(v, "summaries shown") {
+		t.Fatalf("summary after m: %s", v)
+	}
+	run(m, key("m"))
+	if strings.Contains(plain(m.View()), "touches o/a PR 1") {
+		t.Fatalf("summary must hide again: %s", plain(m.View()))
+	}
+	cats, _ := st.Categories("github.com", "o/a")
+	if cats[1].Priority != "high" || cats[2].Category != "docs" {
+		t.Fatalf("stored: %+v", cats)
+	}
+	if catsB, _ := st.Categories("github.com", "o/b"); len(catsB) != 1 || catsB[2].Priority != "normal" {
+		t.Fatalf("no result for a failed run: %+v", catsB)
+	}
+	// a refresh runs the hook only for requests without a result; the
+	// failed one waits for x
+	drain(m, m.refresh())
+	for url, n := range f.runs {
+		if n != 1 {
+			t.Fatalf("%s ran %d times", url, n)
+		}
+	}
+	if !strings.Contains(plain(m.View()), "hook boom") {
+		t.Fatalf("error must stay after refresh: %s", plain(m.View()))
+	}
+	// p shows only the high priority requests
+	run(m, key("p"))
+	v = plain(m.View())
+	if !strings.Contains(v, "high only") || !strings.Contains(v, "o/a PR 1") || strings.Contains(v, "o/a PR 2") || strings.Contains(v, "o/b PR") {
+		t.Fatalf("high only: %s", v)
+	}
+	run(m, key("p"))
+	// x runs the hook again for the selected request
+	run(m, key("G")) // o/b PR 2
+	_, cmd := m.Update(key("x"))
+	if !m.findRequest("https://github.com/o/b/pull/2").Categorizing {
+		t.Fatal("x must mark the request as categorizing")
+	}
+	if !strings.Contains(plain(m.View()), "[categorizing…]") || !strings.Contains(plain(m.View()), "1 hook running") {
+		t.Fatalf("in progress: %s", plain(m.View()))
+	}
+	drain(m, cmd)
+	if f.runs["https://github.com/o/b/pull/2"] != 2 {
+		t.Fatalf("x runs: %v", f.runs)
+	}
+	// x on the failed request clears the error and runs again
+	run(m, key("k"))
+	_, cmd = m.Update(key("x"))
+	drain(m, cmd)
+	if f.runs["https://github.com/o/b/pull/1"] != 2 || len(m.failed) != 1 {
+		t.Fatalf("failed retry: runs %v failed %v", f.runs, m.failed)
+	}
+	// C prunes the results of closed pull requests
+	st.SetCategory("github.com", "o/a", 99, store.ReviewCategory{Priority: "low"})
+	run(m, key("C"))
+	cats, _ = st.Categories("github.com", "o/a")
+	if _, ok := cats[99]; ok || len(cats) != 2 {
+		t.Fatalf("after C: %+v", cats)
+	}
+}
+
+func TestReviewsSummaryWraps(t *testing.T) {
+	m, _, _ := newTestCategorized(t)
+	r := m.findRequest("https://github.com/o/a/pull/1")
+	r.Category.Summary = "The change rewrites the token check in the auth middleware and drops the old session table"
+	run(m, key("m"))
+	run(m, tea.WindowSizeMsg{Width: 40, Height: 40})
+	v := plain(m.View())
+	for _, line := range strings.Split(v, "\n") {
+		if ansi.StringWidth(line) > 40 {
+			t.Fatalf("row wider than the screen: %q", line)
+		}
+	}
+	joined := strings.Join(strings.Fields(v), " ")
+	if !strings.Contains(joined, "drops the old session table") {
+		t.Fatalf("summary must not be cut: %s", v)
+	}
+	if !strings.Contains(v, "\n    token check") && !strings.Contains(v, "\n    middleware") && !strings.Contains(v, "\n    auth middleware") && !strings.Contains(v, "\n    in the auth") {
+		t.Fatalf("continuation rows must keep the indent: %s", v)
+	}
+	// with an unknown width the summary stays on one row
+	if got := wrapIndent("a b c", 4, 0); len(got) != 1 {
+		t.Fatalf("unknown width: %v", got)
+	}
+	if got := wrapIndent("aaaa bbbb cccc", 4, 13); len(got) != 2 || got[0] != "aaaa bbbb" || got[1] != "cccc" {
+		t.Fatalf("wrap: %q", got)
+	}
+	// a word wider than the row breaks inside the word instead of being cut
+	if got := wrapIndent("abcdefghij", 4, 9); len(got) != 2 || got[0] != "abcde" || got[1] != "fghij" {
+		t.Fatalf("hard wrap: %q", got)
+	}
+}
+
+func TestReviewsCategorizeOff(t *testing.T) {
+	m, _ := newTestReviews(t)
+	v := plain(m.View())
+	if strings.Contains(v, "high") || strings.Contains(v, "categoriz") {
+		t.Fatalf("no hook text without a hook: %s", v)
+	}
+	run(m, key("p"))
+	run(m, key("m"))
+	if m.highOnly || m.summaries {
+		t.Fatal("p and m must do nothing without a hook")
+	}
 }
 
 func TestReviewsViewAndSeen(t *testing.T) {

@@ -128,6 +128,59 @@ func TestReposAndSeen(t *testing.T) {
 	}
 }
 
+func TestCategories(t *testing.T) {
+	st := testStore(t)
+	if _, err := st.SubscribeRepo(Repo{Domain: "github.com", Repo: "o/r"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetCategory("github.com", "o/r", 1, ReviewCategory{Priority: "high", Category: "security", Summary: "touches auth"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetCategory("github.com", "o/r", 2, ReviewCategory{Priority: "low"}); err != nil {
+		t.Fatal(err)
+	}
+	// a second set replaces the row
+	if err := st.SetCategory("github.com", "o/r", 2, ReviewCategory{Priority: "normal", Category: "docs"}); err != nil {
+		t.Fatal(err)
+	}
+	cats, err := st.Categories("github.com", "o/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cats) != 2 || cats[1].Priority != "high" || cats[1].Category != "security" || cats[1].Summary != "touches auth" {
+		t.Fatalf("categories: %+v", cats)
+	}
+	if cats[2].Priority != "normal" || cats[2].Category != "docs" || cats[2].CreatedAt.IsZero() {
+		t.Fatalf("replaced row: %+v", cats[2])
+	}
+	if err := st.DeleteCategory("github.com", "o/r", 1); err != nil {
+		t.Fatal(err)
+	}
+	cats, _ = st.Categories("github.com", "o/r")
+	if _, ok := cats[1]; ok || len(cats) != 1 {
+		t.Fatalf("after delete: %+v", cats)
+	}
+	st.SetCategory("github.com", "o/r", 3, ReviewCategory{Priority: "low"})
+	if err := st.PruneCategories("github.com", "o/r", []int{3}); err != nil {
+		t.Fatal(err)
+	}
+	cats, _ = st.Categories("github.com", "o/r")
+	if _, ok := cats[3]; !ok || len(cats) != 1 {
+		t.Fatalf("after prune: %+v", cats)
+	}
+	if err := st.UnsubscribeRepo("github.com", "o/r"); err != nil {
+		t.Fatal(err)
+	}
+	cats, _ = st.Categories("github.com", "o/r")
+	if len(cats) != 0 {
+		t.Fatalf("categories must cascade on unsubscribe: %v", cats)
+	}
+	// no repo row: the foreign key rejects the insert
+	if err := st.SetCategory("github.com", "o/none", 1, ReviewCategory{Priority: "low"}); err == nil {
+		t.Fatal("expected foreign key error")
+	}
+}
+
 func TestDomains(t *testing.T) {
 	st := testStore(t)
 	st.SubscribePull(Pull{URL: "https://b.example/o/r/pull/1", Domain: "b.example", Repo: "o/r", Number: 1})

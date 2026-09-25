@@ -2,12 +2,15 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github-manager/internal/github"
+	"github-manager/internal/hook"
 	"github-manager/internal/store"
 )
 
@@ -16,6 +19,13 @@ type ReviewRequest struct {
 	github.ReviewRequest
 	Seen     bool // committed as seen
 	Watching bool // subscribed under pulls
+	// Category is the result of the categorize hook. Nil means the hook has
+	// not run yet, or is off.
+	Category *store.ReviewCategory
+	// CategoryErr is the error from the hook run of this session. The hook
+	// does not run again for this pull request until the user asks.
+	CategoryErr  error
+	Categorizing bool // the hook runs now
 }
 
 // ReviewEntry is one watched repository with its review requests, or the
@@ -37,6 +47,10 @@ type ReviewsOptions struct {
 	Expanded bool // show every review request, not only the new ones
 	// Open opens a URL in the browser. Nil means the system default.
 	Open func(url string) error
+	// Categorize runs the categorize hook for one review request. Nil turns
+	// the hook off. The model runs it once per pull request and keeps the
+	// result in the store; the runs of one refresh go in parallel.
+	Categorize func(hook.Input) (hook.Result, error)
 }
 
 // ReviewLoader returns a Load function that uses the gh client. It fetches
@@ -78,6 +92,13 @@ type reviewsLoadedMsg struct {
 	err     error
 }
 
+// reviewCategorizedMsg is the result of one categorize hook run.
+type reviewCategorizedMsg struct {
+	ref    github.PullRef
+	result hook.Result
+	err    error
+}
+
 // reviewRow is one cursor position: a request of an entry, or the entry
 // itself when req is -1 (a repository with nothing to show).
 type reviewRow struct {
@@ -94,6 +115,13 @@ type reviewsModel struct {
 	loading     bool
 	refreshedAt time.Time
 	showAll     bool
+	highOnly    bool // show only the requests with high priority
+	summaries   bool // show the hook summary under each request
+
+	// categorizing holds the urls whose hook run is in progress, and
+	// failed holds the error of each run that failed in this session.
+	categorizing map[string]bool
+	failed       map[string]error
 
 	errMsg    string
 	statusMsg string
@@ -109,7 +137,7 @@ func newReviewsModel(o ReviewsOptions) *reviewsModel {
 	if o.Interval <= 0 {
 		o.Interval = 5 * time.Minute
 	}
-	return &reviewsModel{o: o, showAll: o.Expanded}
+	return &reviewsModel{o: o, showAll: o.Expanded, categorizing: map[string]bool{}, failed: map[string]error{}}
 }
 
 func (m *reviewsModel) Init() tea.Cmd {
@@ -117,13 +145,15 @@ func (m *reviewsModel) Init() tea.Cmd {
 }
 
 // refresh loads the review requests of every watched repository in the
-// background, then marks the seen and the watched ones from the store.
+// background, then marks the seen and the watched ones from the store, and
+// attaches the stored hook results.
 func (m *reviewsModel) refresh() tea.Cmd {
 	if m.loading {
 		return nil
 	}
 	m.loading = true
 	o := m.o
+	categorize := o.Categorize != nil
 	return func() tea.Msg {
 		repos, err := o.Store.ListRepos()
 		if err != nil {
@@ -148,14 +178,134 @@ func (m *reviewsModel) refresh() tea.Cmd {
 				e.Err = err
 				continue
 			}
+			var cats map[int]store.ReviewCategory
+			if categorize {
+				if cats, err = o.Store.Categories(e.Repo.Domain, e.Repo.Repo); err != nil {
+					e.Err = err
+					continue
+				}
+			}
 			for j := range e.Requests {
 				r := &e.Requests[j]
 				r.Seen = seen[r.Ref.Number]
 				r.Watching = watching[r.Ref.URL]
+				if c, ok := cats[r.Ref.Number]; ok {
+					r.Category = &c
+				}
 			}
 		}
 		return reviewsLoadedMsg{entries: entries, at: time.Now()}
 	}
+}
+
+// categorizeMissing starts the hook for every request without a stored
+// result, one command per request so the runs go in parallel. A request
+// whose run is in progress, or failed in this session, is skipped.
+func (m *reviewsModel) categorizeMissing() tea.Cmd {
+	if m.o.Categorize == nil {
+		return nil
+	}
+	var cmds []tea.Cmd
+	for i := range m.entries {
+		e := &m.entries[i]
+		if e.Err != nil {
+			continue
+		}
+		for j := range e.Requests {
+			r := &e.Requests[j]
+			if err, ok := m.failed[r.Ref.URL]; ok {
+				r.CategoryErr = err
+			}
+			if m.categorizing[r.Ref.URL] {
+				r.Categorizing = true
+			}
+			if r.Category != nil || r.Categorizing || r.CategoryErr != nil {
+				continue
+			}
+			m.categorizing[r.Ref.URL] = true
+			r.Categorizing = true
+			cmds = append(cmds, m.categorize(r.ReviewRequest))
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// categorize runs the hook for one request in the background.
+func (m *reviewsModel) categorize(r github.ReviewRequest) tea.Cmd {
+	run := m.o.Categorize
+	in := hook.Input{URL: r.Ref.URL, Domain: r.Ref.Domain, Repo: r.Ref.Repo, Number: r.Ref.Number, Title: r.Title, Author: r.Author, Draft: r.Draft}
+	return func() tea.Msg {
+		res, err := run(in)
+		return reviewCategorizedMsg{ref: r.Ref, result: res, err: err}
+	}
+}
+
+// findRequest returns the request with the url, or nil when the list no
+// longer holds it.
+func (m *reviewsModel) findRequest(url string) *ReviewRequest {
+	for i := range m.entries {
+		for j := range m.entries[i].Requests {
+			if r := &m.entries[i].Requests[j]; r.Ref.URL == url {
+				return r
+			}
+		}
+	}
+	return nil
+}
+
+// categorized stores the hook result and shows it on the request. A failed
+// run is remembered for the session, so the hook does not run again for
+// that pull request until the user presses x.
+func (m *reviewsModel) categorized(msg reviewCategorizedMsg) {
+	delete(m.categorizing, msg.ref.URL)
+	r := m.findRequest(msg.ref.URL)
+	if r != nil {
+		r.Categorizing = false
+	}
+	if msg.err != nil {
+		m.failed[msg.ref.URL] = msg.err
+		if r != nil {
+			r.CategoryErr = msg.err
+		}
+		return
+	}
+	c := store.ReviewCategory{Priority: msg.result.Priority, Category: msg.result.Category, Summary: msg.result.Summary}
+	if err := m.o.Store.SetCategory(msg.ref.Domain, msg.ref.Repo, msg.ref.Number, c); err != nil {
+		// the repository can be unsubscribed while the hook runs; the
+		// result then has no row to live in
+		if r != nil {
+			m.errMsg = err.Error()
+		}
+		return
+	}
+	if r != nil {
+		r.Category = &c
+		m.clampCursor()
+	}
+}
+
+// recategorize forgets the stored result of the selected request and runs
+// the hook again.
+func (m *reviewsModel) recategorize(row reviewRow) tea.Cmd {
+	e := &m.entries[row.entry]
+	r := &e.Requests[row.req]
+	if r.Categorizing {
+		return nil
+	}
+	if err := m.o.Store.DeleteCategory(e.Repo.Domain, e.Repo.Repo, r.Ref.Number); err != nil {
+		m.errMsg = err.Error()
+		return nil
+	}
+	delete(m.failed, r.Ref.URL)
+	r.Category = nil
+	r.CategoryErr = nil
+	m.statusMsg = fmt.Sprintf("categorizing %s#%d", e.Repo.Repo, r.Ref.Number)
+	return m.categorizeMissing()
+}
+
+// isHigh reports whether the request has a high priority.
+func (r ReviewRequest) isHigh() bool {
+	return r.Category != nil && r.Category.Priority == "high"
 }
 
 // rows returns the cursor positions to show.
@@ -168,6 +318,9 @@ func (m *reviewsModel) rows() []reviewRow {
 		}
 		n := len(out)
 		for ri, r := range e.Requests {
+			if m.highOnly && !r.isHigh() {
+				continue
+			}
 			if m.showAll || !r.Seen {
 				out = append(out, reviewRow{ei, ri})
 			}
@@ -215,6 +368,9 @@ func (m *reviewsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.entries = msg.entries
 		m.clampCursor()
+		return m, m.categorizeMissing()
+	case reviewCategorizedMsg:
+		m.categorized(msg)
 		return m, nil
 	case tea.KeyMsg:
 		return m.updateKeys(msg)
@@ -270,6 +426,19 @@ func (m *reviewsModel) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.showAll = !m.showAll
 		m.clampCursor()
+	case "p":
+		if m.o.Categorize != nil {
+			m.highOnly = !m.highOnly
+			m.clampCursor()
+		}
+	case "m":
+		if m.o.Categorize != nil {
+			m.summaries = !m.summaries
+		}
+	case "x":
+		if row, ok := m.selected(); ok && row.req >= 0 && m.o.Categorize != nil {
+			return m, m.recategorize(row)
+		}
 	case "c":
 		if row, ok := m.selected(); ok && row.req >= 0 {
 			m.markSeen(row)
@@ -329,6 +498,10 @@ func (m *reviewsModel) markAllSeen() {
 			m.errMsg = err.Error()
 			return
 		}
+		if err := m.o.Store.PruneCategories(e.Repo.Domain, e.Repo.Repo, numbers); err != nil {
+			m.errMsg = err.Error()
+			return
+		}
 		for j := range e.Requests {
 			if !e.Requests[j].Seen {
 				count++
@@ -366,22 +539,43 @@ func (m *reviewsModel) items() [][]string {
 
 // frame builds the screen layout for the current state.
 func (m *reviewsModel) frame() frame {
-	total, newCount := 0, 0
+	total, newCount, high := 0, 0, 0
 	for _, e := range m.entries {
 		for _, r := range e.Requests {
 			total++
 			if !r.Seen {
 				newCount++
 			}
+			if r.isHigh() {
+				high++
+			}
 		}
 	}
 	header := fmt.Sprintf("reviews · %s across %s (%d total pending)",
 		plural(newCount, "new review request"), plural(len(m.entries), "repo"), total)
+	if m.o.Categorize != nil {
+		header += fmt.Sprintf(" · %d high", high)
+		if n := len(m.categorizing); n > 0 {
+			header += " · " + plural(n, "hook running")
+		}
+	}
 	if m.showAll {
 		header += " · all shown"
 	}
+	if m.highOnly {
+		header += " · high only"
+	}
+	if m.summaries {
+		header += " · summaries shown"
+	}
 	if !m.refreshedAt.IsZero() {
 		header += " · refreshed " + m.refreshedAt.Local().Format("15:04:05")
+	}
+	help := "c commit · s subscribe pull · o open · r refresh · a toggle all"
+	moreHelp := "j/k move · C commit all"
+	if m.o.Categorize != nil {
+		help += " · p high only · m summaries"
+		moreHelp += " · x categorize again"
 	}
 	return frame{
 		width:        m.width,
@@ -391,8 +585,8 @@ func (m *reviewsModel) frame() frame {
 		errMsg:       m.errMsg,
 		status:       m.statusMsg,
 		helpExpanded: m.helpOn,
-		help:         "c commit · s subscribe pull · o open · r refresh · a toggle all",
-		moreHelp:     "j/k move · C commit all",
+		help:         help,
+		moreHelp:     moreHelp,
 	}
 }
 
@@ -406,6 +600,8 @@ func (m *reviewsModel) View() string {
 		body = []string{dimStyle.Render("loading…")}
 	case len(m.entries) == 0:
 		body = []string{dimStyle.Render("no watched repositories · run: ghw reviews subscribe <repo>")}
+	case len(items) == 0 && m.highOnly:
+		body = []string{dimStyle.Render("no high priority review requests · press p to show every priority")}
 	case len(items) == 0:
 		body = []string{dimStyle.Render("no new review requests · press a to show every request")}
 	default:
@@ -450,6 +646,9 @@ func (m *reviewsModel) renderRow(row reviewRow, first, selected bool) []string {
 	if r.Draft {
 		parts = append(parts, dimItalic.Render("[DRAFT]"))
 	}
+	if tag := categoryTag(r); tag != "" {
+		parts = append(parts, tag)
+	}
 	title := r.Title
 	if selected {
 		title = selectedStyle.Render(title)
@@ -467,5 +666,57 @@ func (m *reviewsModel) renderRow(row reviewRow, first, selected bool) []string {
 	}
 	rows = append(rows, line)
 	rows = append(rows, "    "+dimStyle.Render(r.Ref.URL))
+	switch {
+	case r.CategoryErr != nil:
+		rows = append(rows, "    "+errStyle.Render(r.CategoryErr.Error()))
+	case m.summaries && r.Category != nil && r.Category.Summary != "":
+		for _, line := range wrapIndent(r.Category.Summary, 4, m.width) {
+			rows = append(rows, "    "+dimStyle.Render(line))
+		}
+	}
 	return rows
+}
+
+// wrapIndent wraps plain text onto rows that fit the width after an indent
+// of the given size. It breaks between words, and inside a word only when
+// the word alone is wider than the row. A width of zero means unknown, and
+// the text stays on one row.
+func wrapIndent(text string, indent, width int) []string {
+	limit := width - indent
+	if width <= 0 || limit < 1 {
+		return []string{text}
+	}
+	return strings.Split(ansi.Wrap(text, limit, ""), "\n")
+}
+
+// categoryTag draws the hook result of a request: the priority in upper
+// case with the category label, such as [HIGH security]. A normal priority
+// shows only the label, and nothing when there is none. A run in progress
+// shows [categorizing…].
+func categoryTag(r ReviewRequest) string {
+	if r.Categorizing {
+		return dimItalic.Render("[categorizing…]")
+	}
+	if r.Category == nil {
+		return ""
+	}
+	c := r.Category
+	switch c.Priority {
+	case "high":
+		return redStyle.Bold(true).Render("[" + join("HIGH", c.Category) + "]")
+	case "low":
+		return dimItalic.Render("[" + join("LOW", c.Category) + "]")
+	}
+	if c.Category == "" {
+		return ""
+	}
+	return cyanStyle.Render("[" + c.Category + "]")
+}
+
+// join puts a space between two words and leaves out an empty one.
+func join(a, b string) string {
+	if b == "" {
+		return a
+	}
+	return a + " " + b
 }

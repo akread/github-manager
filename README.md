@@ -40,6 +40,8 @@ ghw reviews subscribe https://ghe.example.com/owner/name
 ghw reviews unsubscribe owner/name
 ghw reviews list
 ghw reviews watch [--expanded]
+
+ghw config set hooks.categorize.command '~/.config/ghw/categorize-pull.sh'
 ```
 
 ### pulls watch
@@ -88,8 +90,61 @@ The watch lists the open pull requests that request your review, grouped by repo
 | `o` | open the selected pull request, or the repository, in the browser |
 | `r` | refresh now |
 | `a` | show every request, or only the new ones |
+| `p` | show only the requests with a high priority, or every priority. Needs the categorize hook. |
+| `m` | show or hide the summary from the categorize hook under each request; the summaries are hidden by default, and the header reads `summaries shown` when they are on |
+| `x` | forget the stored hook result of the selected request and run the categorize hook again |
 | `?` | expand or collapse the help |
 | `q` | quit |
+
+### categorize hook
+
+The reviews watch can run a command of yours once per review request, to sort the requests by how soon you must look at them. Set `hooks.categorize.command` in the config to turn it on:
+
+```toml
+[hooks.categorize]
+command = "~/.config/ghw/categorize-pull.sh"   # run with sh -c
+timeout = "2m"                                 # default 2m; the command is killed after this
+```
+
+After each refresh, the watch runs the command for every request that has no stored result. The runs go in parallel, one process per request, and the header reads `N hooks running` until they finish. A request whose run is in progress shows `[categorizing…]`. The result is stored in the database by pull request, so the command runs one time per pull request, and not again on later refreshes or restarts. `C` drops the stored results of pull requests that are no longer open. Press `x` to forget the stored result of one request and run the command again. A failed run shows its error under the request, in red, and the watch does not run the command again for that pull request in this session; `x` retries it.
+
+The command gets the pull request as JSON on stdin, and as environment variables:
+
+```json
+{"url":"https://github.com/owner/name/pull/123","domain":"github.com","repo":"owner/name","number":123,"title":"Fix auth","author":"alice","draft":false}
+```
+
+| Variable | Value |
+| --- | --- |
+| `GHW_PULL_URL` | the pull request url |
+| `GHW_PULL_DOMAIN` | the GitHub host |
+| `GHW_PULL_REPO` | `owner/name` |
+| `GHW_PULL_NUMBER` | the pull request number |
+| `GHW_PULL_TITLE` | the title |
+| `GHW_PULL_AUTHOR` | the author login |
+| `GHW_PULL_DRAFT` | `true` or `false` |
+
+The command must exit 0 and print one JSON object on stdout. Text before the object is ignored, so the command can log to stdout first.
+
+```json
+{"priority":"high","category":"security","summary":"Changes the token check in the auth middleware."}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `priority` | required; `high`, `normal`, or `low`, in any case |
+| `category` | optional short label; the list cuts it at 24 characters |
+| `summary` | optional one line; line breaks become spaces |
+
+A high priority shows `[HIGH category]` in red before the title, a low one shows `[LOW category]` in the dim style, and a normal one shows only `[category]`. Press `m` to show the summary under the url; it wraps onto more rows when it is wider than the screen. The header counts the high priority requests, and `p` limits the list to them.
+
+A one-line hook that flags every draft as low and the rest as normal:
+
+```sh
+ghw config set hooks.categorize.command 'if [ "$GHW_PULL_DRAFT" = true ]; then echo "{\"priority\":\"low\"}"; else echo "{\"priority\":\"normal\"}"; fi'
+```
+
+A hook can ask Claude Code to read the diff and decide: fetch the pull request with `gh pr view` and `gh pr diff`, pipe a prompt to `claude -p --output-format json --json-schema <schema>`, and print the `structured_output` field of its result with `jq`.
 
 ### configuration
 
@@ -100,6 +155,10 @@ refresh_interval = "5m"   # watch refresh interval; default 5m
 
 [domains."github.com"]
 excluded_usernames = ["svc-bot-account"]   # comment authors to ignore
+
+[hooks.categorize]
+command = "~/.config/ghw/categorize-pull.sh"   # reviews watch: categorize each review request; see above
+timeout = "2m"
 ```
 
 `ghw config get/set/add/delete <key> [value...]` edit the file with dotted keys. A key segment with a dot goes in double quotes. `set` replaces the whole value of an array key and accepts many values; `add` appends one value to an array key. `ghw config list` prints every key, `config path` prints the location, and `config edit` opens the file in `$VISUAL`, `$EDITOR`, or `vi`.
@@ -129,5 +188,6 @@ internal/cli/      # cobra commands: pulls, reviews, config
 internal/config/   # toml config: typed load, and get/set/add/delete on dotted keys
 internal/store/    # sqlite: watched pulls, watched repos, seen review requests
 internal/github/   # gh cli wrapper, url parsing, status derivation
+internal/hook/     # runs the categorize command and parses its output
 internal/tui/      # bubbletea models for the two watch commands
 ```

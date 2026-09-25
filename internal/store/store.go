@@ -1,5 +1,6 @@
 // Package store persists subscriptions in SQLite: watched pull requests,
-// watched repositories, and the review requests already seen per repository.
+// watched repositories, the review requests already seen per repository,
+// and the category of each review request from the categorize hook.
 package store
 
 import (
@@ -38,6 +39,16 @@ type Repo struct {
 // Key is the "domain/owner/name" form used in messages.
 func (r Repo) Key() string { return r.Domain + "/" + r.Repo }
 
+// ReviewCategory is the result of the categorize hook for one review
+// request. The hook runs once per pull request, so the row stays until the
+// pull request leaves the list or the user asks for a new run.
+type ReviewCategory struct {
+	Priority  string // high, normal, or low
+	Category  string // short label, can be empty
+	Summary   string // one line, can be empty
+	CreatedAt time.Time
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS pulls (
 	url        TEXT PRIMARY KEY,
@@ -57,6 +68,17 @@ CREATE TABLE IF NOT EXISTS review_seen (
 	domain  TEXT NOT NULL,
 	repo    TEXT NOT NULL,
 	number  INTEGER NOT NULL,
+	PRIMARY KEY (domain, repo, number),
+	FOREIGN KEY (domain, repo) REFERENCES repos(domain, repo) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS review_category (
+	domain     TEXT NOT NULL,
+	repo       TEXT NOT NULL,
+	number     INTEGER NOT NULL,
+	priority   TEXT NOT NULL,
+	category   TEXT NOT NULL,
+	summary    TEXT NOT NULL,
+	created_at TEXT NOT NULL,
 	PRIMARY KEY (domain, repo, number),
 	FOREIGN KEY (domain, repo) REFERENCES repos(domain, repo) ON DELETE CASCADE
 );
@@ -302,8 +324,14 @@ func (s *Store) MarkSeen(domain, repo string, numbers ...int) error {
 // PruneSeen removes seen numbers that are not in keep, so the seen set does
 // not grow with closed pull requests.
 func (s *Store) PruneSeen(domain, repo string, keep []int) error {
+	return s.pruneNumbers("review_seen", domain, repo, keep)
+}
+
+// pruneNumbers deletes the rows of a repository whose number is not in
+// keep.
+func (s *Store) pruneNumbers(table, domain, repo string, keep []int) error {
 	if len(keep) == 0 {
-		_, err := s.db.Exec(`DELETE FROM review_seen WHERE domain = ? AND repo = ?`, domain, repo)
+		_, err := s.db.Exec(`DELETE FROM `+table+` WHERE domain = ? AND repo = ?`, domain, repo)
 		return err
 	}
 	args := []any{domain, repo}
@@ -313,8 +341,55 @@ func (s *Store) PruneSeen(domain, repo string, keep []int) error {
 		args = append(args, n)
 	}
 	_, err := s.db.Exec(
-		`DELETE FROM review_seen WHERE domain = ? AND repo = ? AND number NOT IN (`+strings.Join(marks, ",")+`)`, args...)
+		`DELETE FROM `+table+` WHERE domain = ? AND repo = ? AND number NOT IN (`+strings.Join(marks, ",")+`)`, args...)
 	return err
+}
+
+// Categories returns the categorized review requests of a repository by
+// pull request number.
+func (s *Store) Categories(domain, repo string) (map[int]ReviewCategory, error) {
+	rows, err := s.db.Query(`SELECT number, priority, category, summary, created_at FROM review_category WHERE domain = ? AND repo = ?`, domain, repo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int]ReviewCategory{}
+	for rows.Next() {
+		var n int
+		var c ReviewCategory
+		var created string
+		if err := rows.Scan(&n, &c.Priority, &c.Category, &c.Summary, &created); err != nil {
+			return nil, err
+		}
+		c.CreatedAt = parseTime(created)
+		out[n] = c
+	}
+	return out, rows.Err()
+}
+
+// SetCategory records the hook result for one review request. It replaces
+// an earlier result.
+func (s *Store) SetCategory(domain, repo string, number int, c ReviewCategory) error {
+	_, err := s.db.Exec(
+		`INSERT INTO review_category (domain, repo, number, priority, category, summary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(domain, repo, number) DO UPDATE SET
+		   priority = excluded.priority, category = excluded.category, summary = excluded.summary, created_at = excluded.created_at`,
+		domain, repo, number, c.Priority, c.Category, c.Summary, formatTime(s.now()),
+	)
+	return err
+}
+
+// DeleteCategory forgets the hook result for one review request, so the
+// hook runs again on the next refresh.
+func (s *Store) DeleteCategory(domain, repo string, number int) error {
+	_, err := s.db.Exec(`DELETE FROM review_category WHERE domain = ? AND repo = ? AND number = ?`, domain, repo, number)
+	return err
+}
+
+// PruneCategories removes the results of pull requests that are not in
+// keep, so the table does not grow with closed pull requests.
+func (s *Store) PruneCategories(domain, repo string, keep []int) error {
+	return s.pruneNumbers("review_category", domain, repo, keep)
 }
 
 // Domains returns every domain that has a watched pull request or

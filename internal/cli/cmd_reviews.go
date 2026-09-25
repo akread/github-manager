@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github-manager/internal/github"
+	"github-manager/internal/hook"
 	"github-manager/internal/store"
 	"github-manager/internal/tui"
 )
@@ -131,14 +132,27 @@ Keys: j/k move, c commit the selected request as seen, C commit all, s
 subscribe the selected pull request under pulls, o open in the browser, r
 refresh, a show all or only new, ? expand or collapse the help, q quit.
 
+With hooks.categorize.command set, the watch runs that command once per
+review request and shows its priority and category. Press p to show only the
+high priority requests, m to show or hide the summaries, and x to run the hook
+again for the selected one.
+
 The help is one row; items that do not fit are cut, and "? help" appears at
 the right edge. The j/k and C items show only in the expanded help. Press ?
 to wrap every item onto more rows.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, interval, err := loadConfig()
+		cfg, interval, err := loadConfig()
 		if err != nil {
 			return err
+		}
+		var categorize func(hook.Input) (hook.Result, error)
+		if h := cfg.Hooks.Categorize; h.Enabled() {
+			timeout, err := h.Duration()
+			if err != nil {
+				return fmt.Errorf("hooks.categorize: %w", err)
+			}
+			categorize = hook.Categorizer{Command: h.Command, Timeout: timeout}.Run
 		}
 		st, err := openStore()
 		if err != nil {
@@ -146,10 +160,11 @@ to wrap every item onto more rows.`,
 		}
 		defer st.Close()
 		return tui.RunReviews(tui.ReviewsOptions{
-			Store:    st,
-			Load:     tui.ReviewLoader(github.NewClient()),
-			Interval: interval,
-			Expanded: reviewsWatchExpanded,
+			Store:      st,
+			Load:       tui.ReviewLoader(github.NewClient()),
+			Interval:   interval,
+			Expanded:   reviewsWatchExpanded,
+			Categorize: categorize,
 		})
 	},
 }

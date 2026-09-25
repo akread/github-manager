@@ -24,11 +24,50 @@ type Domain struct {
 	ExcludedUsernames []string `toml:"excluded_usernames,omitempty"`
 }
 
+// DefaultHookTimeout is the time a hook command gets when the config does
+// not set one.
+const DefaultHookTimeout = 2 * time.Minute
+
+// Hook is one external command that ghw runs.
+type Hook struct {
+	// Command is a shell command, run with `sh -c`. An empty command turns
+	// the hook off.
+	Command string `toml:"command,omitempty"`
+	// Timeout is a duration string such as "2m". The hook is killed after
+	// this time.
+	Timeout string `toml:"timeout,omitempty"`
+}
+
+// Hooks holds the external commands.
+type Hooks struct {
+	// Categorize runs once per review request and returns its priority.
+	Categorize Hook `toml:"categorize,omitempty"`
+}
+
 // Config is the typed view of the config file.
 type Config struct {
 	// RefreshInterval is a duration string such as "5m" or "90s".
 	RefreshInterval string            `toml:"refresh_interval,omitempty"`
 	Domains         map[string]Domain `toml:"domains,omitempty"`
+	Hooks           Hooks             `toml:"hooks,omitempty"`
+}
+
+// Enabled reports whether the hook has a command.
+func (h Hook) Enabled() bool { return strings.TrimSpace(h.Command) != "" }
+
+// Duration returns the hook timeout.
+func (h Hook) Duration() (time.Duration, error) {
+	if h.Timeout == "" {
+		return DefaultHookTimeout, nil
+	}
+	d, err := time.ParseDuration(h.Timeout)
+	if err != nil {
+		return 0, fmt.Errorf("hook timeout %q: %w", h.Timeout, err)
+	}
+	if d < time.Second {
+		return 0, fmt.Errorf("hook timeout %q: must be at least 1s", h.Timeout)
+	}
+	return d, nil
 }
 
 // Interval returns the refresh interval for the watch commands.
