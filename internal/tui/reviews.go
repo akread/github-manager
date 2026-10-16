@@ -572,10 +572,10 @@ func (m *reviewsModel) frame() frame {
 		header += " · refreshed " + m.refreshedAt.Local().Format("15:04:05")
 	}
 	help := "c commit · s subscribe pull · o open"
-	viewHelp := "r refresh · a toggle all"
+	viewHelp := "r refresh · " + toggleHelp("a", "all", m.showAll)
 	if m.o.Categorize != nil {
 		help += " · x categorize again"
-		viewHelp += " · p high only · m summaries"
+		viewHelp += helpSep + toggleHelp("p", "high only", m.highOnly) + helpSep + toggleHelp("m", "summaries", m.summaries)
 	}
 	viewHelp += " · j/k move · C commit all"
 	return frame{

@@ -211,6 +211,17 @@ type frame struct {
 // helpSep separates the items of a help text.
 const helpSep = " · "
 
+// toggleHelp formats a help item for a shortcut that turns a view option
+// on or off. A dot after the label shows the state: filled is on, empty
+// is off. An action item has no dot, so the dot alone tells the two apart.
+func toggleHelp(key, label string, on bool) string {
+	dot := "○"
+	if on {
+		dot = "●"
+	}
+	return key + " " + label + " " + dot
+}
+
 // wrapHelp splits a help text into rows that fit the width. It breaks only
 // between items, so a shortcut and its label stay on one row. A width of
 // zero means unknown, and the text stays on one row.

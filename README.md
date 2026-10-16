@@ -76,7 +76,7 @@ The commit is per pull request. The JavaScript tool committed every pull request
 
 Both watch screens take mouse input: the wheel scrolls the list, and a left click moves the cursor to the row under the pointer.
 
-The help is two rows. The first row lists the shortcuts that act on the selected pull request. The second row lists the shortcuts that act on the whole view: subscribe, refresh, filter, the toggles, `j` / `k`, and `C`. When a row does not fit, it cuts its shortcuts with an ellipsis and the right edge reads `? help · q quit`. Press `?` to wrap every shortcut onto as many rows as it needs, and again to collapse it. The right-edge keys stay on the bottom row in both states.
+The help is two rows. The first row lists the shortcuts that act on the selected pull request. The second row lists the shortcuts that act on the whole view: subscribe, refresh, filter, the toggles, `j` / `k`, and `C`. A toggle shows a dot after its label: `●` when the option is on, `○` when it is off. An action has no dot. When a row does not fit, it cuts its shortcuts with an ellipsis and the right edge reads `? help · q quit`. Press `?` to wrap every shortcut onto as many rows as it needs, and again to collapse it. The right-edge keys stay on the bottom row in both states.
 
 ### reviews watch
 

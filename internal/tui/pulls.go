@@ -560,6 +560,15 @@ func (m *pullsModel) reportMerge(e PullEntry) {
 	}
 }
 
+// draftHelp returns the help item for D. The dot shows the draft state of
+// the selected pull request when its last refresh succeeded.
+func (m *pullsModel) draftHelp() string {
+	if i := m.selected(); i >= 0 && m.entries[i].Status != nil {
+		return toggleHelp("D", "draft", m.entries[i].Status.Draft)
+	}
+	return "D draft"
+}
+
 // toggleDraft flips the draft state of one pull request in the background.
 // Only an open pull request whose last refresh succeeded can change. No
 // prompt confirms the change, because a second D undoes it.
@@ -717,8 +726,14 @@ func (m *pullsModel) frame() frame {
 		errMsg:       m.errMsg,
 		status:       m.statusMsg,
 		helpExpanded: m.helpOn,
-		help:         "c commit · o open · M merge · D toggle draft · u unsubscribe",
-		viewHelp:     "s subscribe · r refresh · / filter · a toggle all · A toggle mine · m toggle comments · j/k move · C commit all",
+		help:         "c commit · o open · M merge · " + m.draftHelp() + " · u unsubscribe",
+		viewHelp: strings.Join([]string{
+			"s subscribe", "r refresh", "/ filter",
+			toggleHelp("a", "all", m.showAll),
+			toggleHelp("A", "mine", m.showMine),
+			toggleHelp("m", "comments", m.showComments),
+			"j/k move", "C commit all",
+		}, helpSep),
 	}
 	if m.filterText() != "" {
 		f.viewHelp += " · esc clear filter"
