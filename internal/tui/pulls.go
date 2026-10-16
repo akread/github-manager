@@ -37,6 +37,9 @@ type PullsOptions struct {
 	// Merge merges a pull request with a method: merge, squash, or rebase.
 	// Nil disables the merge shortcut.
 	Merge func(ref github.PullRef, method string) error
+	// SetDraft marks a pull request as a draft, or as ready for review.
+	// Nil disables the draft shortcut.
+	SetDraft func(ref github.PullRef, draft bool) error
 }
 
 // PullLoader returns a Load function that uses the gh client. It fetches up
@@ -84,6 +87,13 @@ type pullLoadedMsg struct {
 type pullMergedMsg struct {
 	pull store.Pull
 	err  error
+}
+
+// pullDraftMsg reports the result of a draft toggle started with D.
+type pullDraftMsg struct {
+	pull  store.Pull
+	draft bool // the state the toggle asked for
+	err   error
 }
 
 type pullsModel struct {
@@ -249,6 +259,8 @@ func (m *pullsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case pullMergedMsg:
 		return m, m.merged(msg)
+	case pullDraftMsg:
+		return m, m.drafted(msg)
 	case tea.KeyMsg:
 		if m.inputOn {
 			return m.updateInput(msg)
@@ -354,6 +366,10 @@ func (m *pullsModel) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "M":
 		if i := m.selected(); i >= 0 {
 			m.openMerge(i)
+		}
+	case "D":
+		if i := m.selected(); i >= 0 {
+			return m, m.toggleDraft(i)
 		}
 	case "/":
 		m.filterOn = true
@@ -544,6 +560,60 @@ func (m *pullsModel) reportMerge(e PullEntry) {
 	}
 }
 
+// toggleDraft flips the draft state of one pull request in the background.
+// Only an open pull request whose last refresh succeeded can change. No
+// prompt confirms the change, because a second D undoes it.
+func (m *pullsModel) toggleDraft(i int) tea.Cmd {
+	e := m.entries[i]
+	switch {
+	case m.o.SetDraft == nil:
+		m.errMsg = "draft toggle is not available"
+		return nil
+	case e.Err != nil || e.Status == nil:
+		m.errMsg = "cannot change draft: the last refresh of this pull request failed"
+		return nil
+	case e.Status.Merged:
+		m.errMsg = "cannot change draft: the pull request is already merged"
+		return nil
+	case e.Status.State != "open":
+		m.errMsg = "cannot change draft: the pull request is not open"
+		return nil
+	}
+	p, draft := e.Pull, !e.Status.Draft
+	m.statusMsg = fmt.Sprintf("marking %s#%d as %s…", p.Repo, p.Number, draftLabel(draft))
+	setDraft := m.o.SetDraft
+	return func() tea.Msg {
+		ref := github.PullRef{URL: p.URL, Domain: p.Domain, Repo: p.Repo, Number: p.Number}
+		return pullDraftMsg{pull: p, draft: draft, err: setDraft(ref, draft)}
+	}
+}
+
+// drafted shows the result of a draft toggle. After a success it reloads
+// the pull request, so the list shows its new state.
+func (m *pullsModel) drafted(msg pullDraftMsg) tea.Cmd {
+	label := fmt.Sprintf("%s#%d", msg.pull.Repo, msg.pull.Number)
+	if msg.err != nil {
+		m.statusMsg = ""
+		m.errMsg = "mark " + label + " as " + draftLabel(msg.draft) + ": " + msg.err.Error()
+		return nil
+	}
+	m.errMsg = ""
+	m.statusMsg = "marked " + label + " as " + draftLabel(msg.draft)
+	load := m.o.Load
+	p := msg.pull
+	return func() tea.Msg {
+		return pullLoadedMsg{entry: load([]store.Pull{p})[0]}
+	}
+}
+
+// draftLabel names a draft state for the status row.
+func draftLabel(draft bool) string {
+	if draft {
+		return "draft"
+	}
+	return "ready for review"
+}
+
 func (m *pullsModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
@@ -647,35 +717,35 @@ func (m *pullsModel) frame() frame {
 		errMsg:       m.errMsg,
 		status:       m.statusMsg,
 		helpExpanded: m.helpOn,
-		help:         "c commit · s subscribe · o open · M merge · r refresh · / filter · a toggle all · A toggle mine · m toggle comments",
-		moreHelp:     "j/k move · C commit all · u unsubscribe",
+		help:         "c commit · o open · M merge · D toggle draft · u unsubscribe",
+		viewHelp:     "s subscribe · r refresh · / filter · a toggle all · A toggle mine · m toggle comments · j/k move · C commit all",
 	}
 	if m.filterText() != "" {
-		f.help += " · esc clear filter"
+		f.viewHelp += " · esc clear filter"
 	}
 	switch {
 	case m.inputOn:
 		f.input = m.input.View()
 		f.help = "enter subscribe · esc cancel"
-		f.moreHelp = ""
+		f.viewHelp = ""
 		f.helpExpanded = false
 		f.noTail = true
 	case m.filterOn:
 		f.input = m.filter.View()
 		f.help = "enter keep filter · esc clear filter"
-		f.moreHelp = ""
+		f.viewHelp = ""
 		f.helpExpanded = false
 		f.noTail = true
 	case m.mergeOn && m.mergeMethod == "":
 		f.input = fmt.Sprintf("merge %s#%d with:", m.mergePull.Repo, m.mergePull.Number)
 		f.help = "m merge · s squash · r rebase · esc cancel"
-		f.moreHelp = ""
+		f.viewHelp = ""
 		f.helpExpanded = false
 		f.noTail = true
 	case m.mergeOn:
 		f.input = fmt.Sprintf("are you sure you want to %s %s#%d?", m.mergeMethod, m.mergePull.Repo, m.mergePull.Number)
 		f.help = "y merge · n cancel"
-		f.moreHelp = ""
+		f.viewHelp = ""
 		f.helpExpanded = false
 		f.noTail = true
 	}

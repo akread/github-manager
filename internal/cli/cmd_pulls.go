@@ -130,7 +130,9 @@ var pullsWatchCmd = &cobra.Command{
 
 Keys: j/k move, c commit the selected pull request, C commit all, s subscribe
 a url, u unsubscribe, o open in the browser, M merge with gh pr merge after a
-prompt for the method and a confirmation, r refresh, a show all or only updates, A show only your own pull requests or every author, m show or hide
+prompt for the method and a confirmation, D mark the pull request as a draft
+or as ready for review with gh pr ready, r refresh, a show all or only
+updates, A show only your own pull requests or every author, m show or hide
 comment text, ? expand or collapse the help, q quit.
 
 The help is one row; items that do not fit are cut, and "? help" appears at
@@ -152,6 +154,7 @@ to wrap every item onto more rows.`,
 			Store:      st,
 			Load:       tui.PullLoader(client, cfg.Excluded),
 			Merge:      client.MergePull,
+			SetDraft:   client.SetPullDraft,
 			Interval:   interval,
 			Expanded:   pullsWatchExpanded,
 			NoComments: pullsWatchNoComments,

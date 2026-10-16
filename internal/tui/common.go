@@ -202,9 +202,9 @@ type frame struct {
 	input         string // empty when no input is open
 	errMsg        string
 	status        string
-	help          string // the help items, without the tail
-	moreHelp      string // the help items that show only when the help is expanded
-	helpExpanded  bool   // the user pressed ? to show every item on more rows
+	help          string // row 1: the shortcuts that act on the selected item
+	viewHelp      string // row 2: the shortcuts that act on the whole view; empty for one row
+	helpExpanded  bool   // the user pressed ? to wrap every item onto more rows
 	noTail        bool   // leave out the "? help · q quit" tail
 }
 
@@ -234,55 +234,73 @@ func wrapHelp(help string, width int) []string {
 	return append(rows, cur)
 }
 
-// quitTail is the end of the help row when every item fits and no item is
-// hidden. helpTail replaces it when the items are cut, when some items show
-// only in the expanded help, or when the help is expanded, so the user sees
-// the key that toggles the help only when it does something.
+// quitTail is the end of the help row when every item fits. helpTail
+// replaces it when an item is cut, or when the help is expanded, so the
+// user sees the key that toggles the help only when it does something.
 const (
 	quitTail = "q quit"
 	helpTail = "? help · q quit"
 )
 
-// helpRows returns the help rows. The tail sits at the right edge of the
-// last row. By default the items in help take one row and are cut with an
-// ellipsis when they do not fit; the items in moreHelp stay hidden. When
-// expanded, every item wraps onto as many rows as it needs, in the space
-// left of the tail.
+// helpGroups returns the help rows before any wrap or cut: the item
+// shortcuts, then the view shortcuts when the frame has them.
+func (f frame) helpGroups() []string {
+	if f.viewHelp == "" {
+		return []string{f.help}
+	}
+	return []string{f.help, f.viewHelp}
+}
+
+// helpRows returns the help rows. The item shortcuts take the first row
+// and the view shortcuts the second. The tail sits at the right edge of the
+// last row. By default each group takes one row and is cut with an ellipsis
+// when it does not fit. When expanded, each group wraps onto as many rows
+// as it needs; the last group wraps in the space left of the tail.
 func (f frame) helpRows() []string {
+	groups := f.helpGroups()
+	last := len(groups) - 1
 	if f.noTail {
 		if f.width <= 0 {
-			return []string{f.help}
+			return groups
 		}
-		return []string{ansi.Truncate(f.help, f.width, "…")}
-	}
-	tail := quitTail
-	if f.moreHelp != "" {
-		tail = helpTail
+		for i, g := range groups {
+			groups[i] = ansi.Truncate(g, f.width, "…")
+		}
+		return groups
 	}
 	if f.width <= 0 {
-		return []string{f.help + "  " + tail}
+		groups[last] += "  " + quitTail
+		return groups
 	}
-	fits := ansi.StringWidth(f.help) <= f.width-ansi.StringWidth(tail)-2
-	if !fits {
-		tail = helpTail
-	}
-	avail := max(f.width-ansi.StringWidth(tail)-2, 1)
-	var rows []string
-	switch {
-	case f.helpExpanded:
-		full := f.help
-		if f.moreHelp != "" {
-			full += helpSep + f.moreHelp
+	// limit is the width a group can use on one row next to the tail.
+	limit := func(i int, tail string) int {
+		if i < last {
+			return f.width
 		}
-		rows = wrapHelp(full, avail)
-	case fits:
-		rows = []string{f.help}
-	default:
-		rows = []string{ansi.Truncate(f.help, avail, "…")}
+		return max(f.width-ansi.StringWidth(tail)-2, 1)
 	}
-	last := len(rows) - 1
-	pad := f.width - ansi.StringWidth(rows[last]) - ansi.StringWidth(tail)
-	rows[last] += strings.Repeat(" ", max(pad, 1)) + tail
+	tail := quitTail
+	for i, g := range groups {
+		if ansi.StringWidth(g) > limit(i, tail) {
+			tail = helpTail
+			break
+		}
+	}
+	var rows []string
+	for i, g := range groups {
+		lim := limit(i, tail)
+		switch {
+		case f.helpExpanded:
+			rows = append(rows, wrapHelp(g, lim)...)
+		case ansi.StringWidth(g) <= lim:
+			rows = append(rows, g)
+		default:
+			rows = append(rows, ansi.Truncate(g, lim, "…"))
+		}
+	}
+	end := len(rows) - 1
+	pad := f.width - ansi.StringWidth(rows[end]) - ansi.StringWidth(tail)
+	rows[end] += strings.Repeat(" ", max(pad, 1)) + tail
 	return rows
 }
 

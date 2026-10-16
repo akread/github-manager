@@ -237,6 +237,28 @@ func TestMergePull(t *testing.T) {
 	}
 }
 
+func TestSetPullDraft(t *testing.T) {
+	var got [][]string
+	c := &Client{run: func(args ...string) ([]byte, []byte, error) {
+		got = append(got, args)
+		return nil, nil, nil
+	}, users: map[string]string{}}
+	ref := PullRef{URL: "https://github.com/o/r/pull/12", Domain: "github.com", Repo: "o/r", Number: 12}
+	if err := c.SetPullDraft(ref, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetPullDraft(ref, false); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"pr ready 12 --repo github.com/o/r --undo",
+		"pr ready 12 --repo github.com/o/r",
+	}
+	if len(got) != 2 || strings.Join(got[0], " ") != want[0] || strings.Join(got[1], " ") != want[1] {
+		t.Fatalf("args: %v, want %q", got, want)
+	}
+}
+
 func TestPullGraph(t *testing.T) {
 	var got [][]string
 	out := `{"data":{"repository":{"pullRequest":{

@@ -91,6 +91,18 @@ func (c *Client) MergePull(ref PullRef, method string) error {
 	return err
 }
 
+// SetPullDraft marks a pull request as a draft, or as ready for review.
+// gh pr ready does the work: with --undo it converts the pull request to a
+// draft, without it the pull request becomes ready for review.
+func (c *Client) SetPullDraft(ref PullRef, draft bool) error {
+	args := []string{"pr", "ready", fmt.Sprint(ref.Number), "--repo", ref.Domain + "/" + ref.Repo}
+	if draft {
+		args = append(args, "--undo")
+	}
+	_, _, err := c.run(args...)
+	return err
+}
+
 // pullGraph fetches the GraphQL view of a pull request: the merge queue
 // state, the base branch, the legacy branch protection contexts, and the
 // check rollup of the head commit. A host whose schema has no merge queue

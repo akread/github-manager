@@ -571,12 +571,13 @@ func (m *reviewsModel) frame() frame {
 	if !m.refreshedAt.IsZero() {
 		header += " · refreshed " + m.refreshedAt.Local().Format("15:04:05")
 	}
-	help := "c commit · s subscribe pull · o open · r refresh · a toggle all"
-	moreHelp := "j/k move · C commit all"
+	help := "c commit · s subscribe pull · o open"
+	viewHelp := "r refresh · a toggle all"
 	if m.o.Categorize != nil {
-		help += " · p high only · m summaries"
-		moreHelp += " · x categorize again"
+		help += " · x categorize again"
+		viewHelp += " · p high only · m summaries"
 	}
+	viewHelp += " · j/k move · C commit all"
 	return frame{
 		width:        m.width,
 		height:       m.height,
@@ -586,7 +587,7 @@ func (m *reviewsModel) frame() frame {
 		status:       m.statusMsg,
 		helpExpanded: m.helpOn,
 		help:         help,
-		moreHelp:     moreHelp,
+		viewHelp:     viewHelp,
 	}
 }
 

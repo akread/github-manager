@@ -61,6 +61,7 @@ By default the watch shows only pull requests with updates. Comments from you, f
 | `u` | unsubscribe the selected pull request |
 | `o` | open the selected pull request in the browser |
 | `M` | merge the selected pull request with `gh pr merge`. A prompt asks for the method: `m` merge, `s` squash, `r` rebase, or `esc` to cancel. A second prompt asks `are you sure`; press `y` to merge, or `n` to cancel. The repository settings decide whether the method is allowed and whether the branch is deleted. After the merge the watch reloads that pull request and reports the result: `merged`, or `added to the merge queue` when the base branch has a merge queue. |
+| `D` | toggle the draft state of the selected pull request with `gh pr ready`. An open pull request becomes a draft; a draft becomes ready for review. There is no confirmation, because a second `D` undoes the change. After the change the watch reloads that pull request and shows its new state. |
 | `r` | refresh now |
 | `/` | filter the list by title, repo, number, author, or url |
 | `a` | show every pull request, or only those with updates |
@@ -75,7 +76,7 @@ The commit is per pull request. The JavaScript tool committed every pull request
 
 Both watch screens take mouse input: the wheel scrolls the list, and a left click moves the cursor to the row under the pointer.
 
-The help is one row. The `j` / `k` and `C` shortcuts are hidden from it, and `u` in the pulls watch, so the right edge reads `? help · q quit`. When the other shortcuts do not fit, the row cuts them with an ellipsis. Press `?` to show every shortcut, wrapped onto as many rows as it needs, and again to collapse it. The right-edge keys stay on the bottom row in both states.
+The help is two rows. The first row lists the shortcuts that act on the selected pull request. The second row lists the shortcuts that act on the whole view: subscribe, refresh, filter, the toggles, `j` / `k`, and `C`. When a row does not fit, it cuts its shortcuts with an ellipsis and the right edge reads `? help · q quit`. Press `?` to wrap every shortcut onto as many rows as it needs, and again to collapse it. The right-edge keys stay on the bottom row in both states.
 
 ### reviews watch
 

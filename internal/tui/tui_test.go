@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -204,7 +205,7 @@ func TestPullsFilter(t *testing.T) {
 	if m.filterOn || !strings.Contains(v, `filter "TITLE 2"`) || strings.Contains(v, "Title 1") {
 		t.Fatalf("filter kept: %s", v)
 	}
-	if h := m.frame().help; !strings.HasSuffix(h, "esc clear filter") {
+	if h := m.frame().viewHelp; !strings.HasSuffix(h, "esc clear filter") {
 		t.Fatalf("help must show how to clear the filter: %q", h)
 	}
 	// the selected item is the one that matches
@@ -500,6 +501,94 @@ func TestPullsMergeGuards(t *testing.T) {
 	run(m, key("M"))
 	if m.mergeOn || m.errMsg != "cannot merge: the pull request is already merged" {
 		t.Fatalf("merged entry: on=%v err=%q", m.mergeOn, m.errMsg)
+	}
+}
+
+func TestPullsDraft(t *testing.T) {
+	m, st := newTestPulls(t)
+	var got []string
+	draft := false // the fake loader reports this draft state
+	m.o.SetDraft = func(ref github.PullRef, d bool) error {
+		got = append(got, fmt.Sprintf("%s#%d %v", ref.Repo, ref.Number, d))
+		if ref.Number == 2 {
+			return errors.New("not allowed")
+		}
+		draft = d
+		return nil
+	}
+	m.o.Load = func(pulls []store.Pull) []PullEntry {
+		out := fakePullLoader(pulls)
+		for i := range out {
+			if out[i].Status != nil {
+				out[i].Status.Draft = draft
+			}
+		}
+		return out
+	}
+
+	// D marks an open pull request as a draft and reloads it
+	run(m, key("D"))
+	if len(got) != 1 || got[0] != "o/r#1 true" {
+		t.Fatalf("draft calls: %v", got)
+	}
+	if m.statusMsg != "marked o/r#1 as draft" || m.errMsg != "" {
+		t.Fatalf("status=%q err=%q", m.statusMsg, m.errMsg)
+	}
+	if v := plain(m.View()); !strings.Contains(v, "[DRAFT] Title 1") {
+		t.Fatalf("the draft pull request must be reloaded: %s", v)
+	}
+
+	// a second D marks the draft as ready for review
+	run(m, key("D"))
+	if len(got) != 2 || got[1] != "o/r#1 false" {
+		t.Fatalf("draft calls: %v", got)
+	}
+	if m.statusMsg != "marked o/r#1 as ready for review" || m.errMsg != "" {
+		t.Fatalf("status=%q err=%q", m.statusMsg, m.errMsg)
+	}
+	if v := plain(m.View()); !strings.Contains(v, "[OPEN] Title 1") {
+		t.Fatalf("the ready pull request must be reloaded: %s", v)
+	}
+
+	// an error shows in the error row and the state does not change
+	run(m, key("a"))
+	run(m, key("j"))
+	run(m, key("D"))
+	if len(got) != 3 || got[2] != "o/r#2 true" {
+		t.Fatalf("draft calls: %v", got)
+	}
+	if !strings.Contains(m.errMsg, "mark o/r#2 as draft: not allowed") || m.statusMsg != "" {
+		t.Fatalf("status=%q err=%q", m.statusMsg, m.errMsg)
+	}
+
+	// the guards refuse a nil SetDraft, a failed entry, and a closed or
+	// merged pull request
+	run(m, key("g"))
+	m.o.SetDraft = nil
+	run(m, key("D"))
+	if m.errMsg != "draft toggle is not available" {
+		t.Fatalf("nil SetDraft: err=%q", m.errMsg)
+	}
+	m.o.SetDraft = func(github.PullRef, bool) error { t.Fatal("draft must not run"); return nil }
+
+	st.SubscribePull(store.Pull{URL: "https://github.com/o/r/pull/broken", Domain: "github.com", Repo: "o/r", Number: 7})
+	run(m, key("r"))
+	run(m, key("G"))
+	run(m, key("D"))
+	if !strings.Contains(m.errMsg, "last refresh of this pull request failed") {
+		t.Fatalf("failed entry: err=%q", m.errMsg)
+	}
+
+	run(m, key("g"))
+	m.entries[m.selected()].Status.State = "closed"
+	run(m, key("D"))
+	if m.errMsg != "cannot change draft: the pull request is not open" {
+		t.Fatalf("closed entry: err=%q", m.errMsg)
+	}
+	m.entries[m.selected()].Status.Merged = true
+	run(m, key("D"))
+	if m.errMsg != "cannot change draft: the pull request is already merged" {
+		t.Fatalf("merged entry: err=%q", m.errMsg)
 	}
 }
 
@@ -832,64 +921,72 @@ func lastLine(v string) string {
 
 func TestHelpRow(t *testing.T) {
 	m, _ := newTestPulls(t)
-	// wide: one row, every default item, none cut. The move and commit all
-	// items are hidden, so the right edge reads "? help · q quit".
+	// wide: two rows, the item shortcuts above the view shortcuts, none
+	// cut. Nothing is hidden, so the right edge reads only "q quit".
 	run(m, tea.WindowSizeMsg{Width: 160, Height: 30})
-	last := lastLine(plain(m.View()))
-	if !strings.Contains(last, "m toggle comments") || !strings.HasSuffix(last, helpTail) || strings.Contains(last, "…") {
-		t.Fatalf("wide: %q", last)
-	}
-	if strings.Contains(last, "j/k move") || strings.Contains(last, "C commit all") || strings.Contains(last, "u unsubscribe") {
-		t.Fatalf("wide: the hidden items must not show: %q", last)
-	}
-	if ansi.StringWidth(last) != 160 {
-		t.Fatalf("wide: the tail must sit at the right edge, width %d", ansi.StringWidth(last))
-	}
-	// ? shows the hidden items after the default ones
-	run(m, key("?"))
 	v := plain(m.View())
-	joined := strings.Join(helpBlock(v), "\n")
-	flat := strings.ReplaceAll(joined, "\n", helpSep) // the rows break only between items
-	if !strings.Contains(flat, "m toggle comments · j/k move · C commit all · u unsubscribe") || strings.Contains(joined, "…") || !strings.HasSuffix(lastLine(v), helpTail) {
-		t.Fatalf("wide expanded: %q", joined)
+	block := helpBlock(v)
+	if len(block) != 2 || strings.Contains(strings.Join(block, "\n"), "…") {
+		t.Fatalf("wide: %q", block)
+	}
+	if !strings.HasPrefix(block[0], "c commit · o open") || !strings.HasSuffix(block[0], "u unsubscribe") {
+		t.Fatalf("wide item row: %q", block[0])
+	}
+	if !strings.HasPrefix(block[1], "s subscribe · r refresh") || !strings.Contains(block[1], "j/k move · C commit all") || !strings.HasSuffix(block[1], quitTail) || strings.Contains(block[1], "? help") {
+		t.Fatalf("wide view row: %q", block[1])
+	}
+	if ansi.StringWidth(block[1]) != 160 {
+		t.Fatalf("wide: the tail must sit at the right edge, width %d", ansi.StringWidth(block[1]))
 	}
 	if n := strings.Count(v, "\n"); n != 29 {
-		t.Fatalf("wide expanded view must fill the height exactly: %d newlines", n)
+		t.Fatalf("wide view must fill the height exactly: %d newlines", n)
+	}
+	// ? changes nothing when every item fits
+	run(m, key("?"))
+	if plain(m.View()) != v {
+		t.Fatalf("wide expanded: %s", plain(m.View()))
 	}
 	run(m, key("?"))
-	if lastLine(plain(m.View())) != last {
-		t.Fatalf("wide collapsed again: %q", lastLine(plain(m.View())))
-	}
 
-	// no hidden items and every item fits: only "q quit", and ? does nothing
+	// one group and no tail wanted: one row
 	f := frame{width: 160, help: "c commit · o open"}
 	if rows := f.helpRows(); len(rows) != 1 || !strings.HasSuffix(rows[0], quitTail) || strings.Contains(rows[0], "? help") {
-		t.Fatalf("no hidden items: %q", rows)
+		t.Fatalf("one group: %q", rows)
 	}
 	f.helpExpanded = true
 	if rows := f.helpRows(); len(rows) != 1 || !strings.HasSuffix(rows[0], quitTail) || strings.Contains(rows[0], "? help") {
-		t.Fatalf("no hidden items, expanded: %q", rows)
+		t.Fatalf("one group, expanded: %q", rows)
+	}
+	// an unknown width keeps both rows whole, the tail after the last
+	f = frame{help: "c commit", viewHelp: "r refresh"}
+	if rows := f.helpRows(); len(rows) != 2 || rows[0] != "c commit" || rows[1] != "r refresh  "+quitTail {
+		t.Fatalf("unknown width: %q", rows)
 	}
 
-	// narrow: still one row, the items cut, "? help · q quit" whole
+	// narrow: still two rows. The item row fits the full width; the view
+	// row is cut, so the tail reads "? help · q quit" and stays whole.
 	run(m, tea.WindowSizeMsg{Width: 60, Height: 30})
 	v = plain(m.View())
-	last = lastLine(v)
+	block = helpBlock(v)
+	if len(block) != 2 || strings.Contains(block[0], "…") || !strings.HasSuffix(block[0], "u unsubscribe") {
+		t.Fatalf("narrow item row: %q", block)
+	}
+	last := block[1]
 	if !strings.Contains(last, "…") || !strings.HasSuffix(last, helpTail) || ansi.StringWidth(last) != 60 {
-		t.Fatalf("narrow: %q", last)
+		t.Fatalf("narrow view row: %q", last)
 	}
 	if n := strings.Count(v, "\n"); n != 29 {
 		t.Fatalf("view must fill the height exactly: %d newlines", n)
 	}
 
-	// ? expands the items onto more rows; the tail sits bottom right
+	// ? wraps the view row onto more rows; the tail sits bottom right
 	run(m, key("?"))
 	v = plain(m.View())
 	if strings.Contains(v, "…") {
 		t.Fatalf("expanded help must not be cut: %s", v)
 	}
-	block := helpBlock(v)
-	if len(block) < 2 {
+	block = helpBlock(v)
+	if len(block) < 3 || !strings.HasSuffix(block[0], "u unsubscribe") {
 		t.Fatalf("expanded block: %q", block)
 	}
 	bottom := block[len(block)-1]
@@ -900,8 +997,9 @@ func TestHelpRow(t *testing.T) {
 	if strings.Contains(above, "? help") || strings.Contains(above, "q quit") {
 		t.Fatalf("expanded rows above: %q", above)
 	}
-	if joined := strings.Join(block, "\n"); !strings.Contains(joined, "j/k move") || !strings.Contains(joined, "C commit all") {
-		t.Fatalf("expanded help must show the hidden items: %q", joined)
+	flat := strings.ReplaceAll(strings.Join(block[1:], "\n"), "\n", helpSep) // the rows break only between items
+	if !strings.HasPrefix(flat, "s subscribe · r refresh · / filter") || !strings.Contains(flat, "j/k move · C commit all") {
+		t.Fatalf("expanded view rows: %q", flat)
 	}
 	if n := strings.Count(v, "\n"); n != 29 {
 		t.Fatalf("expanded view must fill the height exactly: %d newlines", n)
@@ -911,24 +1009,23 @@ func TestHelpRow(t *testing.T) {
 		t.Fatalf("collapsed again: %s", plain(m.View()))
 	}
 
-	// the input help has no tail and is never expanded
+	// the input help is one row with no tail, and is never expanded
 	run(m, key("s"))
-	last = lastLine(plain(m.View()))
-	if last != "enter subscribe · esc cancel" {
-		t.Fatalf("input help: %q", last)
+	if block := helpBlock(plain(m.View())); len(block) != 1 || block[0] != "enter subscribe · esc cancel" {
+		t.Fatalf("input help: %q", block)
 	}
 	run(m, key("esc"))
 
 	r, _ := newTestReviews(t)
 	run(r, tea.WindowSizeMsg{Width: 40, Height: 30})
-	last = lastLine(plain(r.View()))
-	if !strings.HasSuffix(last, helpTail) || !strings.Contains(last, "…") {
-		t.Fatalf("reviews narrow: %q", last)
+	block = helpBlock(plain(r.View()))
+	if len(block) != 2 || !strings.HasPrefix(block[0], "c commit · s subscribe pull") || !strings.HasSuffix(block[1], helpTail) || !strings.Contains(block[1], "…") {
+		t.Fatalf("reviews narrow: %q", block)
 	}
 	run(r, key("?"))
 	helpLines := helpBlock(plain(r.View()))
-	joined = strings.Join(helpLines, "\n")
-	if len(helpLines) < 2 || strings.Contains(joined, "…") || !strings.HasSuffix(helpLines[len(helpLines)-1], helpTail) || strings.Count(joined, "q quit") != 1 || !strings.Contains(joined, "C commit all") {
+	joined := strings.Join(helpLines, "\n")
+	if len(helpLines) < 3 || strings.Contains(joined, "…") || !strings.HasSuffix(helpLines[len(helpLines)-1], helpTail) || strings.Count(joined, "q quit") != 1 || !strings.Contains(joined, "C commit all") {
 		t.Fatalf("reviews expanded help: %s", joined)
 	}
 }
